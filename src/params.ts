@@ -106,6 +106,21 @@ export const params = {
     capZ: 26,
   },
 
+  /**
+   * Levitation: when the button floats above the page (scene.goo.hover > 0, or a pushed-back page), it rides on an
+   * air cushion. A press pushes the whole button toward the page and tilts it toward an off-centre finger; let go
+   * and it springs back. The squish and the fingerprints ride on top.
+   */
+  levitation: {
+    /** How far a full press pushes the button toward the page (CSS px; never further than the air gap allows). */
+    travel: 10,
+    /** Cushion: natural frequency (Hz) and damping ratio (1 = no overshoot). */
+    stiffness: 4,
+    damping: 0.35,
+    /** Tilt toward an off-centre press: 0 = none, 1 = a rigid plate on a uniform cushion. */
+    tilt: 0.3,
+  },
+
   intro: {
     /** Footprint shrink of the dropped blob, how long it stays liquid, and how fast it sets into putty. */
     shrink: 0.82,

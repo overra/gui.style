@@ -99,13 +99,14 @@ h1 {
   -webkit-tap-highlight-color: transparent;
 }
 
-/* The glass is drawn here; the canvas extends past the button by --goo-m on every side. */
+/* The glass is drawn here; the canvas extends past the button by --goo-m on every side, or further
+   (--goo-bleed, set by main.ts) when a floating button's shadow lands further out. */
 .goo-canvas {
   position: absolute;
-  left: calc(-1 * var(--goo-m));
-  top: calc(-1 * var(--goo-m));
-  width: calc(100% + 2 * var(--goo-m));
-  height: calc(100% + 2 * var(--goo-m));
+  left: calc(-1 * var(--goo-bleed, var(--goo-m)));
+  top: calc(-1 * var(--goo-bleed, var(--goo-m)));
+  width: calc(100% + 2 * var(--goo-bleed, var(--goo-m)));
+  height: calc(100% + 2 * var(--goo-bleed, var(--goo-m)));
   display: block;
   pointer-events: none;
   opacity: 0;

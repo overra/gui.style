@@ -6,10 +6,13 @@ import type { TgpuRoot } from 'typegpu';
 import type { Theme } from '../background.ts';
 import type { GlassInput, Goo } from '../gpu/goo.ts';
 import type { Layout } from '../layout.ts';
+import type { LevitationPose } from '../levitation.ts';
 import { looks } from '../look.ts';
+import { params } from '../params.ts';
 import type { FingerTracker } from '../touches.ts';
 import type { ConfigMode } from './configMode.ts';
-import { defaultScene, glassDepthTerms, glassLights, type Scene } from './scene.ts';
+import { normalize } from './math.ts';
+import { defaultScene, gapSoftening, glassDepthTerms, glassLights, MAX_HOVER, type Scene } from './scene.ts';
 import './scene.css';
 
 export interface SceneHostDeps {
@@ -21,23 +24,52 @@ export interface SceneHostDeps {
   clock: () => number;
   wake: () => void;
   layout: () => Layout | null;
+  /** Where the levitating goo is this frame (levitation.ts). */
+  pose: () => LevitationPose;
   /** Re-measure the page layout (after the 3D view hands the page UI back). */
   resync: () => void;
 }
 
 export function createSceneHost(deps: SceneHostDeps) {
   const scene: Scene = defaultScene();
+  const query = new URLSearchParams(location.search);
+  // ?hover=40 starts with the button floating 40 px above the page.
+  const hover = Number(query.get('hover'));
+  if (query.has('hover') && Number.isFinite(hover)) scene.goo.hover = Math.min(Math.max(hover, 0), MAX_HOVER);
   let goo: Goo | null = null;
   let root: TgpuRoot | null = null;
   let config: ConfigMode | null = null;
   let loading: Promise<ConfigMode | null> | null = null;
 
-  /** Normal mode: the scene's lights, eye distance and page depth, as glass uniforms. */
+  /** Normal mode: the scene's lights, eye distance, page depth and the floating goo, as glass uniforms. */
   const glassHook = (values: GlassInput, theme: Theme): GlassInput => ({
     ...values,
     ...glassLights(scene, theme),
-    ...glassDepthTerms(scene, looks[theme]),
+    ...glassDepthTerms(scene, looks[theme], deps.pose()),
   });
+
+  /**
+   * How far past the button a floating goo's shadow reaches in normal mode (CSS px): displaced toward the far side
+   * of the key light by the gap (plus a spring overshoot), spread by the softened blur, and shifted by the camera's
+   * parallax between page and goo. The goo canvas grows to fit it (main.ts).
+   */
+  function shadowReach(): number {
+    const layout = deps.layout();
+    const s0 = layout?.shapes[0];
+    const rest = scene.goo.hover + scene.page.depth;
+    if (!layout || !s0 || rest <= 0) return 0;
+    const look = looks[deps.theme()];
+    const gap = rest + 0.3 * params.levitation.travel;
+    const sun = scene.lights.find((l) => l.kind === 'sun');
+    const L = normalize(sun ? sun.dir : [look.lightDir[0], look.lightDir[1], look.lightDir[2]]);
+    const shift = (gap * Math.max(Math.abs(L[0]), Math.abs(L[1]))) / Math.max(L[2], 0.05);
+    const D = scene.camera.distance;
+    const fromCenter =
+      Math.hypot(layout.canvasX + s0.cx - layout.viewportW / 2, layout.canvasY + s0.cy - layout.viewportH / 2) + Math.max(s0.hx, s0.hy);
+    const parallax = ((D + scene.page.depth) / Math.max(D - scene.goo.hover, 0.2 * D) - 1) * fromCenter;
+    const sigma = gapSoftening(scene, look, gap).shadowSigma ?? look.shadowSigma;
+    return shift + parallax + look.shadowReach + 2.5 * sigma;
+  }
 
   function sceneChanged() {
     deps.wake();
@@ -81,7 +113,6 @@ export function createSceneHost(deps: SceneHostDeps) {
   const isActive = () => !!config && config.wanted;
 
   // ---- the toggle: a key everywhere, a button where it is useful ----
-  const query = new URLSearchParams(location.search);
   const showButton = import.meta.env.DEV || query.has('scene') || query.has('tune');
   let toggle: HTMLButtonElement | null = null;
   if (showButton) {
@@ -114,6 +145,7 @@ export function createSceneHost(deps: SceneHostDeps) {
     attach,
     detach,
     sceneChanged,
+    shadowReach,
     /** True while the 3D view owns the page UI (its DOM boxes are transformed or re-parented). */
     get holdsLayout() {
       return !!config && config.phase !== 'off';

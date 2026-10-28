@@ -4,12 +4,15 @@ import GUI from 'lil-gui';
 import type { Theme } from './background.ts';
 import { looks } from './look.ts';
 import { params } from './params.ts';
+import { MAX_HOVER } from './scene/scene.ts';
 
 export interface TuningHooks {
   theme: () => Theme;
   wake: () => void;
   replayDrop: () => void;
   tap: () => void;
+  /** The goo's place in the scene (scene/scene.ts): its hover height above the page. */
+  goo: { hover: number };
 }
 
 type Feel = typeof params.feel;
@@ -42,6 +45,15 @@ export function openTuning(hooks: TuningHooks) {
   feel.add(params.feel, 'fingerprint', 0, 1, 0.01).name('fingerprint (none → exaggerated)');
   feel.add({ drop: hooks.replayDrop }, 'drop').name('Drop it again');
   feel.add({ tap: hooks.tap }, 'tap').name('Tap the middle');
+
+  // Levitation: lift the button off the page; presses then push the whole button down and tilt it, and it springs
+  // back. The 3D scene view (C) shows the same values in its own panel.
+  const float = gui.addFolder('Levitation');
+  float.add(hooks.goo, 'hover', 0, MAX_HOVER, 1).name('hover height (px)').listen();
+  float.add(params.levitation, 'travel', 0, 30, 0.5).name('press travel (px)').listen();
+  float.add(params.levitation, 'stiffness', 1, 15, 0.1).name('stiffness (Hz)').listen();
+  float.add(params.levitation, 'damping', 0.05, 1.2, 0.01).name('damping (bouncy → still)').listen();
+  float.add(params.levitation, 'tilt', 0, 1, 0.01).name('tilt toward the press').listen();
 
   // Base values: the feel macros scale these.
   const physics = gui.addFolder('Physics (base values)');

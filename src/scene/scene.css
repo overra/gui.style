@@ -126,6 +126,11 @@ html.scene-on body {
   background: rgba(120, 200, 255, 0.92);
 }
 
+.scene-label[data-kind='goo'] {
+  color: #00230f;
+  background: rgba(143, 255, 184, 0.92);
+}
+
 .scene-label[data-selected] {
   outline: 2px solid #fff;
 }

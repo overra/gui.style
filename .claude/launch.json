@@ -24,6 +24,17 @@
       "port": 5181
     },
     {
+      "name": "goo-levitate",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "vite",
+        "--port",
+        "5182",
+        "--strictPort"
+      ],
+      "port": 5182
+    },
+    {
       "name": "goo-preview",
       "runtimeExecutable": "npx",
       "runtimeArgs": [

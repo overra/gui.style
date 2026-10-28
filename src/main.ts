@@ -5,12 +5,15 @@ import { effectiveParams } from './feel.ts';
 import { createGoo, type Goo } from './gpu/goo.ts';
 import { attachInput } from './input.ts';
 import { measureLayout, type Layout } from './layout.ts';
+import { createLevitation } from './levitation.ts';
 import { looks } from './look.ts';
 import { params } from './params.ts';
 import { createSceneHost } from './scene/host.ts';
 import { FingerTracker } from './touches.ts';
 
 const MAX_DPR = 2;
+/** How far the goo canvas may reach past the button for a floating button's shadow (CSS px). */
+const MAX_BLEED = 192;
 const NO_WEBGPU = 'WebGPU isn’t available here, so this is a static stand-in. Try a recent Chrome, Edge or Safari.';
 
 const pageBg = document.getElementById('page-bg') as HTMLCanvasElement;
@@ -74,6 +77,8 @@ async function requestDevice(): Promise<GPUDevice | null> {
 
 // ---- the live goo ----
 const tracker = new FingerTracker(params.finger);
+/** The whole button's rigid motion when it floats above the page (presses sink and tilt it). */
+const levitation = createLevitation();
 let goo: Goo | null = null;
 let layout: Layout | null = null;
 let gooScale = 1;
@@ -133,6 +138,19 @@ function track() {
   goo.setViewport(layout.canvasX, layout.canvasY, p.width, p.height);
 }
 
+// A floating button's shadow lands further out than --goo-m: the goo canvas grows to fit it (in 16 px steps, so a
+// hover slider doesn't re-lay out the goo on every tick; resizing it rebuilds the simulation grid at rest).
+const gooMargin = parseFloat(getComputedStyle(gooWrap).getPropertyValue('--goo-m')) || 48;
+let bleed = gooMargin;
+function syncBleed() {
+  if (sceneHost.holdsLayout) return;
+  const want = Math.min(Math.max(Math.ceil(sceneHost.shadowReach() / 16) * 16, gooMargin), MAX_BLEED);
+  if (want === bleed) return;
+  bleed = want;
+  if (want === gooMargin) gooWrap.style.removeProperty('--goo-bleed');
+  else gooWrap.style.setProperty('--goo-bleed', `${want}px`);
+}
+
 // ---- frame loop: runs while anything moves, sleeps once the goo has healed ----
 let rafId = 0;
 let lastFrame = 0;
@@ -148,7 +166,10 @@ const frame = (ms: number) => {
   const eff = effectiveParams();
   tracker.setTuning(eff.finger);
   tracker.update(now, dt, goo.surfaceAt);
-  if (tracker.busy || sceneHost.busy) quietSince = now;
+  const { scene } = sceneHost;
+  const reducedMotion = motionQuery.matches;
+  levitation.step(dt, { hover: scene.goo.hover, pageDepth: scene.page.depth, layout, tracker, eff, reducedMotion });
+  if (tracker.busy || sceneHost.busy || levitation.moving) quietSince = now;
   // Sleep only once every imprint, ridge and smudge has visibly healed under the current feel settings.
   const settle = Math.max(
     params.sleepAfter,
@@ -158,10 +179,14 @@ const frame = (ms: number) => {
   );
   const sleeping = now - quietSince >= settle;
   // Going to sleep: snap exactly back to the pristine shape and draw it once.
-  if (sleeping) goo.snapToRest();
-  goo.frame({ now, dt, tracker, reducedMotion: motionQuery.matches, sinceIntro: now - droppedAt, eff });
+  if (sleeping) {
+    goo.snapToRest();
+    levitation.reset();
+  }
+  goo.frame({ now, dt, tracker, reducedMotion, sinceIntro: now - droppedAt, eff });
   sceneHost.frame(now);
   tracker.endFrame();
+  syncBleed();
   afterFrame?.();
   afterFrame = null;
 
@@ -205,6 +230,7 @@ const sceneHost = createSceneHost({
   clock,
   wake: () => wake(),
   layout: () => layout,
+  pose: () => levitation.pose,
   resync: () => {
     relayout();
     track();
@@ -287,7 +313,7 @@ async function toggleTuning(open = !guiOpen) {
   guiOpen = open;
   tweak?.setAttribute('aria-expanded', String(open));
   guiPromise ??= import('./tuning.ts').then(({ openTuning }) =>
-    openTuning({ theme, wake, replayDrop: dropAgain, tap: () => buttons[0]?.click() }),
+    openTuning({ theme, wake, replayDrop: dropAgain, tap: () => buttons[0]?.click(), goo: sceneHost.scene.goo }),
   );
   try {
     (await guiPromise).show(guiOpen);
@@ -363,6 +389,8 @@ if (import.meta.env.DEV) {
       params,
       looks,
       tracker,
+      /** The floating button's rigid motion: .pose (height, tilt, pivot), .moving. Hover: __goo.scene.scene.goo. */
+      levitation,
       wake,
       /** The 3D scene: __goo.scene.enter() / exit(), .scene (the model), .identity(), .shot(ms) (see scene/host.ts). */
       scene: sceneHost.dev,
@@ -386,6 +414,12 @@ if (import.meta.env.DEV) {
         virtualNow = null;
         lastFrame = 0;
         wake();
+      },
+      /** Re-measure now (a hidden tab delivers no ResizeObserver callbacks, e.g. after the canvas grew for a shadow). */
+      relayout() {
+        syncBleed();
+        relayout();
+        track();
       },
       drop: dropAgain,
       /** `crop` is [x, y, w, h] in goo-space CSS px (the canvas extends --goo-m past the button). */

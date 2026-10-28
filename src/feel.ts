@@ -18,10 +18,12 @@ export interface Effective {
   introDamping: number;
   /** Shader-only exaggeration: dent depth gain, ridge gain and smudge (haze) gain. */
   visual: { imprintGain: number; ridgeGain: number; hazeGain: number };
+  /** Levitation cushion: press travel (CSS px), natural frequency (rad/s), damping ratio and tilt share. */
+  levitation: { travel: number; omega: number; zeta: number; tilt: number };
 }
 
 export function effectiveParams(): Effective {
-  const { feel, elastic, plastic, heal, finger, detail, intro, sim } = params;
+  const { feel, elastic, plastic, heal, finger, detail, intro, sim, levitation } = params;
   const dt = sim.substep;
   const v = ratio(feel.viscosity, 4);
   const s = ratio(feel.elasticity, 2.8);
@@ -82,6 +84,13 @@ export function effectiveParams(): Effective {
       ridgeGain: f <= 0.5 ? 2 * f : 1 + (f - 0.5) * 6,
       // No ridges, no smudge; exaggerated ridges stay crisp instead of frosting over.
       hazeGain: Math.min(1, 2 * f) * (f > 0.5 ? 1 - (f - 0.5) * 1.2 : 1),
+    },
+    // The cushion is integrated in 1/600 s substeps (levitation.ts): ω and ζ stay well inside that limit.
+    levitation: {
+      travel: Math.max(0, levitation.travel),
+      omega: 2 * Math.PI * clamp(levitation.stiffness, 0.5, 20),
+      zeta: clamp(levitation.damping, 0.02, 2),
+      tilt: clamp(levitation.tilt, 0, 1),
     },
   };
 }

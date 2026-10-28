@@ -7,6 +7,10 @@
 // reflection of a procedural studio seen from a perspective eye, a GGX sun glint, Beer–Lambert body tint,
 // vibrancy, and light on the page below (soft shadow, contact occlusion, caustics) evaluated where it lands.
 // Output is premultiplied: opaque glass, shadow as black-with-alpha, nothing elsewhere.
+//
+// The button can levitate (levitation.ts): an air gap under its flat base, tilted about a pivot. The camera always
+// sees the glass on its DOM box, so the gap shows only below it: rays cross it to the page after leaving the base
+// (where the label sits), and the shadow, contact occlusion and caustics move and spread with it.
 
 import { sdRoundedBox2d } from '@typegpu/sdf';
 import { tgpu, d, std } from 'typegpu';
@@ -155,19 +159,28 @@ const pageOnly = (q: d.v2f, lod: number) => {
   return std.textureSampleLevel(L.$.page, L.$.smp, P.canvasOrigin.add(q).div(P.viewport), lod).xyz;
 };
 
-/** The page with the button label printed on it (only ever seen through the glass). */
-const pageTap = (q: d.v2f, lod: number) => {
+/**
+ * The button label over `col` at goo-space point q (only ever seen through the glass). It is printed on the
+ * glass' flat base: on the page while the goo rests there, lifted with the button when it floats.
+ */
+const labelOver = (col: d.v3f, q: d.v2f, lod: number) => {
   'use gpu';
   const P = L.$.params;
   const lp = L.$.label;
-  let col = pageOnly(q, lod);
+  let out = d.vec3f(col);
   const uv = q.sub(P.labelOrigin).div(P.labelSize);
   if (uv.x > 0 && uv.y > 0 && uv.x < 1 && uv.y < 1) {
     const mask = std.textureSampleLevel(L.$.labelMask, L.$.smp, uv, lod);
-    col = std.mix(col, lp.plateColor, mask.x * lp.plateAlpha);
-    col = std.mix(col, lp.inkColor, mask.y * lp.inkAlpha);
+    out = std.mix(out, lp.plateColor, mask.x * lp.plateAlpha);
+    out = std.mix(out, lp.inkColor, mask.y * lp.inkAlpha);
   }
-  return col;
+  return out;
+};
+
+/** The page with the button label printed on it (the resting goo: no air gap between the two). */
+const pageTap = (q: d.v2f, lod: number) => {
+  'use gpu';
+  return labelOver(pageOnly(q, lod), q, lod);
 };
 
 // ───────────────────────────── refraction ─────────────────────────────
@@ -188,28 +201,72 @@ const lensDepth = (H: number) => {
   return H * std.mix(0.4, 1, P.materialize) + P.depthLens * P.materialize;
 };
 
-/** Where the transmitted ray lands on the page after `depth` px (points up-slope, into the goo). */
-const refractOffset = (n: d.v3f, eta: number, depth: number) => {
+// ───────────────────────────── levitation: the air gap under the glass ─────────────────────────────
+
+/** Air gap (CSS px) under goo-space point p: the floating button's base, tilted about its pivot. */
+const gapAt = (p: d.v2f) => {
   'use gpu';
-  const t = refractDir(n, eta);
-  return t.xy.mul(depth / std.max(-t.z, 0.05));
+  const P = L.$.params;
+  return std.max(P.gap - std.dot(P.tilt, p.sub(P.pivot)), 0);
+};
+
+/** The glass' normal in the world: the putty's own normal, tilted with the floating button (small angles). */
+const tiltNormal = (n: d.v3f) => {
+  'use gpu';
+  const t = L.$.params.tilt;
+  return std.select(n, std.normalize(d.vec3f(n.xy.add(t.mul(n.z)), n.z)), t.x !== 0 || t.y !== 0);
 };
 
 /**
- * Three-tap dispersion (per-channel IOR). Where the red–blue split is far below a device pixel it fades to a
- * single tap — smoothly, since a hard switch shows up as a seam across high-contrast text.
+ * Where a transmitted ray lands after `depth` px of glass (xy: the label on the flat base) and then, out through
+ * the base (Snell again) and across the air gap, on the page (zw). Both are offsets from the entry point, in goo
+ * px; across a pushed-back page they shrink by gapScale. With no gap the two coincide. They point up-slope.
  */
-const sampleRefracted = (p: d.v2f, n: d.v3f, depth: number, lod: number) => {
+const landing = (n: d.v3f, eta: number, depth: number, gap: number) => {
   'use gpu';
   const P = L.$.params;
-  const oR = refractOffset(n, 1 / std.mix(P.iorG, P.iorR, P.materialize), depth);
-  const oG = refractOffset(n, 1 / P.iorG, depth);
-  const oB = refractOffset(n, 1 / std.mix(P.iorG, P.iorB, P.materialize), depth);
-  const cG = pageTap(p.add(oG), lod);
+  const t = refractDir(n, eta);
+  const toBase = t.xy.mul(depth / std.max(-t.z, 0.05));
+  const ta = std.refract(t, std.normalize(d.vec3f(P.tilt, 1)), 1 / eta);
+  const exit = std.select(t, ta, std.dot(ta, ta) > 0.25);
+  const across = exit.xy.mul(gap / std.max(-exit.z, 0.05));
+  return d.vec4f(toBase, toBase.add(across).mul(P.gapScale));
+};
+
+/**
+ * Light reaching page point q (goo space) crossed the glass' base here: toward the key light by the gap, plus
+ * the camera's parallax between the page and the floating goo. groundLight evaluated there moves the shadow, the
+ * contact occlusion and the caustics with the gap; their spread comes in through the uniforms (scene.ts).
+ */
+const casterAt = (q: d.v2f) => {
+  'use gpu';
+  const P = L.$.params;
+  const fromCenter = P.canvasOrigin.add(q).sub(P.viewport.mul(0.5));
+  // World px across the gap become goo px at the goo's height: (1 + parallax)·gapScale = D / (D − height).
+  const toLight = P.lightDir.xy.mul((gapAt(q) * (1 + P.parallax) * P.gapScale) / std.max(P.lightDir.z, 0.05));
+  return q.add(fromCenter.mul(P.parallax)).add(toLight);
+};
+
+/**
+ * Three-tap dispersion (per-channel IOR): each channel's ray picks up the label on the glass' base, then the page
+ * across the air gap. Where the red–blue split is far below a device pixel it fades to a single tap — smoothly,
+ * since a hard switch shows up as a seam across high-contrast text.
+ */
+const sampleRefracted = (p: d.v2f, n: d.v3f, depth: number, gap: number, lod: number) => {
+  'use gpu';
+  const P = L.$.params;
+  const oR = landing(n, 1 / std.mix(P.iorG, P.iorR, P.materialize), depth, gap);
+  const oG = landing(n, 1 / P.iorG, depth, gap);
+  const oB = landing(n, 1 / std.mix(P.iorG, P.iorB, P.materialize), depth, gap);
+  const cG = labelOver(pageOnly(p.add(oG.zw), lod), p.add(oG.xy), lod);
   let col = d.vec3f(cG);
-  const spread = std.smoothstep(0.05, 0.25, std.length(oB.sub(oR)) / P.pxCss);
+  const spread = std.smoothstep(0.05, 0.25, std.length(oB.zw.sub(oR.zw)) / P.pxCss);
   if (spread > 0) {
-    const split = d.vec3f(pageTap(p.add(oR), lod).x, cG.y, pageTap(p.add(oB), lod).z);
+    const split = d.vec3f(
+      labelOver(pageOnly(p.add(oR.zw), lod), p.add(oR.xy), lod).x,
+      cG.y,
+      labelOver(pageOnly(p.add(oB.zw), lod), p.add(oB.xy), lod).z,
+    );
     col = std.mix(cG, split, spread);
   }
   return col;
@@ -324,7 +381,8 @@ const groundLight = (q: d.v2f) => {
     // than its resting footprint).
     const caster = std.smoothstep(0.3, 2.5, coverAt(toLight.sub(footprint(toLight).yz.mul(std.max(sSh, 0) + 4))));
     const edge = std.smoothstep(0.3, 2.5, coverAt(q.sub(fp.yz.mul(std.max(s0, 0) + 2))));
-    const under = softMask(s0 + 1, 1.5);
+    // The clear interior's light: its edge blurs with the shadow's across an air gap.
+    const under = softMask(s0 + 1, 1.5 + P.gapBlur);
     const shadow = P.shadowOpacity * softMask(sSh, P.shadowSigma) * (1 - under) * caster;
     const ao = P.aoOpacity * std.exp(-std.max(s0, 0) / P.aoWidth) * std.smoothstep(-0.5, 0.5, s0) * edge;
     const sinT = std.length(P.lightDir.xy) / P.iorG;
@@ -436,9 +494,10 @@ const shadeGoo = (
 ) => {
   'use gpu';
   const P = L.$.params;
+  const gap = gapAt(p);
   // Transmitted: the page where the ray lands, lit by the light reaching it there, two-way Beer–Lambert, vibrancy.
   // While the dropped goo is still liquid it lenses less; the glass "materializes" as it sets.
-  let trans = sampleRefracted(p, n, lensDepth(H), lod).mul(groundLight(q));
+  let trans = sampleRefracted(p, n, lensDepth(H), gap, lod).mul(groundLight(casterAt(q)));
   const tz = std.max(-refractDir(n, 1 / P.iorG).z, 0.2);
   trans = trans.mul(std.exp(P.absorb.mul(-H * (1 / tz + 1))));
   const Y = std.dot(trans, LUMA.$);
@@ -447,7 +506,8 @@ const shadeGoo = (
   // Reflection, fading in as the dropped goo sets into glass.
   const shine = 0.35 + 0.65 * P.materialize;
   const F = fresnelSchlick(std.dot(n, v), 0.04);
-  const refl = env(r, p, H, fwR).mul(F * shine);
+  // A downward reflection sees the page past the glass and the gap under it.
+  const refl = env(r, p, H + gap, fwR).mul(F * shine);
   const spec = P.lightColor.mul(
     ggxSpecular(n, v, P.lightDir, P.roughness + P.hazeRoughness * haze, a2Filter, P.sunRadius) * shine,
   );
@@ -473,25 +533,26 @@ export const gooFragment = tgpu.fragmentFn({
   const P = L.$.params;
   const p = pos.xy.mul(P.pxCss);
   const S = surfaceAt(p);
+  const n = tiltNormal(S.n);
 
   // Derivative-dependent terms, in uniform control flow (no data-dependent branches above this line).
-  const q = p.add(refractOffset(S.n, 1 / P.iorG, lensDepth(S.H)));
+  const q = p.add(landing(n, 1 / P.iorG, lensDepth(S.H), gapAt(p)).zw);
   const fq = std.fwidth(q).div(P.pxCss);
   const lodLens = std.clamp(std.log2(std.max(std.max(fq.x, fq.y), 1)), 0, P.lodMax);
   const lod = lodLens + P.rimLod * (1 - std.smoothstep(0, 6, -S.sg.x)) + P.hazeLod * S.haze;
   const eye = P.viewport.mul(0.5).sub(P.canvasOrigin.add(p));
   const v = std.normalize(d.vec3f(eye.div(P.eyeDist), 1));
-  const r = std.reflect(v.mul(-1), S.n);
+  const r = std.reflect(v.mul(-1), n);
   const fwR = std.length(std.fwidth(r));
-  const dndx = std.dpdx(S.n);
-  const dndy = std.dpdy(S.n);
+  const dndx = std.dpdx(n);
+  const dndy = std.dpdy(n);
   const a2Filter = std.min(0.5 * (std.dot(dndx, dndx) + std.dot(dndy, dndy)), 0.18);
 
   // Backdrop: express the light reaching the page as an over-operation on the page canvas behind us.
   let outA = d.f32(0);
   let outW = d.f32(0);
   if (S.cov < 1) {
-    const g = std.dot(groundLight(p), LUMA.$);
+    const g = std.dot(groundLight(casterAt(p)), LUMA.$);
     const bgY = std.dot(pageOnly(p, d.f32(0)), LUMA.$);
     const eNow = std.pow(std.max(bgY, 1e-5), 1 / 2.2);
     const eWant = std.pow(std.min(bgY * g, 1), 1 / 2.2);
@@ -502,7 +563,7 @@ export const gooFragment = tgpu.fragmentFn({
   }
   let enc = d.vec3f(0);
   if (S.cov > 0) {
-    const inside = shadeGoo(p, S.sg, S.n, v, r, S.H, S.haze, q, lod, fwR, a2Filter);
+    const inside = shadeGoo(p, S.sg, n, v, r, S.H, S.haze, q, lod, fwR, a2Filter);
     enc = std.saturate(linearToSrgb(highlightShoulder(inside)).add(d.vec3f(ditherTPDF(pos.xy))));
   }
   const a = S.cov + outA * (1 - S.cov);
@@ -519,6 +580,7 @@ export {
   ggxSpecular,
   groundLight,
   highlightShoulder,
+  labelOver,
   linearToSrgb,
   LUMA,
   pageOnly,

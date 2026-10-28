@@ -31,6 +31,10 @@ Presets (glass putty, jelly, honey, modeling clay, crime scene) set all four at 
 them expose the base physics, fingerprint and glass values the sliders scale. Stability guards keep the explicit
 solver within its limits at any setting.
 
+The **Levitation** folder lifts the button off the page: a hover height (0 by default, or `?hover=40` in the URL),
+plus the press travel, stiffness, damping and tilt of the air cushion it floats on. A press then pushes the whole
+button down and tilts it toward the finger, and it springs back. See `docs/3d-config-view.md`.
+
 ## Interaction
 
 - **Press / hold**: the finger sinks in over ~50 ms; holding longer sinks a little deeper and sets a deeper imprint.
@@ -96,6 +100,7 @@ to the exact resting state, so an idle page costs nothing.
 | `src/gpu/simKernels.ts` | Putty simulation |
 | `src/gpu/detailKernels.ts` | Fingerprint layer |
 | `src/gpu/renderShader.ts` | Liquid-glass shading |
+| `src/levitation.ts` | The floating button's rigid-body motion (air-cushion spring) |
 | `src/tuning.ts` | `?tune` panel (lil-gui, loaded on demand) |
 
 ## Dev harness

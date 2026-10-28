@@ -3,7 +3,9 @@
 // gpu/sceneView.ts ray-traces it into a full-viewport canvas that fades in over the flat page.
 //
 // Drag to orbit, right- or shift-drag to pan, wheel or pinch to zoom. Drag a light (its dot or its panel) or the
-// page's blue depth handle. Press the goo to dent it from any angle. C or Esc flies back to the camera.
+// page's blue depth handle. Press the goo to dent it from any angle: the press is found by casting the pointer's
+// ray into the goo's own frame, so it lands where the floating, sinking, tilting button really is. C or Esc flies
+// back to the camera.
 //
 // The page UI (.stage) follows the camera. With html-in-canvas it is drawn into the scene as a texture on the
 // reference plane. Without it, a CSS matrix3d that matches the WebGPU projection carries the live DOM along.
@@ -39,7 +41,6 @@ import {
   project,
   rayPlane,
   rayThrough,
-  rayZ,
   scale,
   sub,
   toSpherical,
@@ -49,18 +50,24 @@ import {
 } from './math.ts';
 import {
   aimLight,
+  airGap,
   cameraEye,
   cameraFov,
   defaultScene,
   distanceForFov,
+  fromGooFrame,
   glassDepthTerms3d,
   glassLights,
+  gooFrame,
+  gooFrameDir,
   lightPosition,
+  MAX_HOVER,
   physicalHalfSize,
   planeScale,
   referenceIrradiance,
   rigTarget,
   sizeFactor,
+  toGooFrame,
   type Scene,
   type SceneLight,
 } from './scene.ts';
@@ -93,6 +100,8 @@ const COLORS = {
   page: [0.47, 0.78, 1, 0.95] as RGBA,
   pageSoft: [0.47, 0.78, 1, 0.45] as RGBA,
   target: [1, 1, 1, 0.8] as RGBA,
+  goo: [0.56, 1, 0.72, 0.9] as RGBA,
+  gooSoft: [0.56, 1, 0.72, 0.5] as RGBA,
 };
 
 /** The page's own background (html { background: var(--page) }), linear: what the camera sees past the page. */
@@ -194,7 +203,7 @@ export function createConfigMode(deps: ConfigDeps) {
   function overviewPose(): OrbitPose {
     const w = window.innerWidth;
     const h = window.innerHeight;
-    const target = rigTarget(deps.layout());
+    const target = rigTarget(deps.layout(), scene);
     const s = planeScale(scene);
     const pts: Vec3[] = [cameraEye(scene), target];
     for (const sx of [-1, 1]) for (const sy of [-1, 1]) pts.push([(sx * w * s) / 2, (sy * h * s) / 2, -scene.page.depth]);
@@ -209,10 +218,11 @@ export function createConfigMode(deps: ConfigDeps) {
 
   function focusPose(): OrbitPose {
     const layout = deps.layout();
-    const target = rigTarget(layout);
+    const target = rigTarget(layout, scene);
     const s = layout?.shapes[0];
     const span = s ? Math.max(s.hx, s.hy) * 2 : 240;
-    return { pivot: [target[0], target[1], 4], polar: 56, azimuth: 30, distance: span * 2.2, fov: 34 };
+    // A floating goo is framed with the gap under it.
+    return { pivot: [target[0], target[1], target[2] * 0.5 + 4], polar: 56, azimuth: 30, distance: span * 2.2 + target[2], fov: 34 };
   }
 
   function flyTo(to: OrbitPose) {
@@ -367,8 +377,9 @@ export function createConfigMode(deps: ConfigDeps) {
     const look = looks[theme];
     const w = layout.viewportW;
     const h = layout.viewportH;
-    const target = rigTarget(layout);
+    const target = rigTarget(layout, scene);
     const res = goo?.sceneResources();
+    const frame = gooFrame(scene, layout, deps.pose());
     const lights = scene.lights.slice(0, MAX_LIGHTS).map((l) => lightInput(l, target, theme));
     while (lights.length < MAX_LIGHTS) lights.push({ ...lightInput(scene.lights[0], target, theme), radiance: d.vec3f(), glow: d.vec3f(), radius: 0 });
     const bd = BACKDROP[theme];
@@ -387,8 +398,12 @@ export function createConfigMode(deps: ConfigDeps) {
       dpr: canvas.width / w,
       resolution: d.vec2f(canvas.width, canvas.height),
       viewportCss: d.vec2f(w, h),
-      gooMin: d.vec2f(layout.canvasX - w / 2, layout.canvasY - h / 2),
       gooSize: d.vec2f(layout.width, layout.height),
+      gooOrigin: vec(frame.origin),
+      gooScale: frame.scale,
+      gooX: vec(frame.x),
+      gooY: vec(frame.y),
+      gooZ: vec(frame.z),
       planeZ: -scene.page.depth,
       planeScale: planeScale(scene),
       pageLit: scene.page.lit,
@@ -408,7 +423,11 @@ export function createConfigMode(deps: ConfigDeps) {
       lights,
     };
     // The flat shader's per-frame values, with the scene's lights; the gap is traced for real, not folded in.
-    const glass = { ...(res?.glass ?? ({} as SceneViewFrame['glass'])), ...glassLights(scene, theme), ...glassDepthTerms3d(scene, look) };
+    const glass = {
+      ...(res?.glass ?? ({} as SceneViewFrame['glass'])),
+      ...glassLights(scene, theme),
+      ...glassDepthTerms3d(scene, look, deps.pose()),
+    };
     return { scene: sceneParams, glass, ...gizmos(layout, target, theme) };
   }
 
@@ -480,6 +499,26 @@ export function createConfigMode(deps: ConfigDeps) {
     line(add(target, [0, -tc, 0]), add(target, [0, tc, 0]), COLORS.target, 1.25);
     line(target, add(target, [0, 0, tc * 2]), COLORS.target, 1.25);
 
+    // A floating goo: its base outline (in its own frame, so it sinks and tilts with presses), the same outline
+    // dropped straight onto the page, and drop lines between them, so the air gap reads at a glance.
+    const s0 = layout.shapes[0];
+    const pose = deps.pose();
+    if (s0 && airGap(scene, pose) > 0.5) {
+      const frame = gooFrame(scene, layout, pose);
+      const r = Math.min(s0.radius, s0.hx, s0.hy);
+      const base: Vec3[] = [];
+      for (const [sx, sy, a0] of [[1, 1, 0], [-1, 1, 90], [-1, -1, 180], [1, -1, 270]]) {
+        for (let k = 0; k <= 5; k++) {
+          const a = (a0 + k * 18) * DEG;
+          base.push(fromGooFrame(frame, [s0.cx + sx * (s0.hx - r) + Math.cos(a) * r, s0.cy + sy * (s0.hy - r) + Math.sin(a) * r, 0]));
+        }
+      }
+      const dropped = base.map((p): Vec3 => [p[0], p[1], -g]);
+      loop(base, COLORS.goo, 1.5);
+      loop(dropped, COLORS.gooSoft, 1, 10);
+      for (let i = 0; i < base.length; i += 6) line(base[i], dropped[i], COLORS.gooSoft, 1, 8);
+    }
+
     // Lights: aim line, outline, handle.
     scene.lights.forEach((l, i) => {
       const p = lightPosition(l, target);
@@ -516,10 +555,17 @@ export function createConfigMode(deps: ConfigDeps) {
     const h = layout.viewportH;
     if (uiMode === 'css') deps.stage.style.transform = cssMatrixForPlane(cam, w, h, stageBox.x, stageBox.y);
     labelLayer.style.opacity = String(overlayAmount());
-    const target = rigTarget(layout);
+    const target = rigTarget(layout, scene);
     const D = scene.camera.distance;
     const s = planeScale(scene);
+    const gap = airGap(scene, deps.pose());
     const items: { id: string; text: string; at: Vec3; kind?: string; selected?: boolean }[] = [
+      {
+        id: 'goo',
+        text: gap > 0.5 ? `Goo · ${Math.round(gap)} px above the page` : 'Goo · resting on the page',
+        at: add(target, [0, -(layout.shapes[0]?.hy ?? 40) - 6, params.shape.plateau]),
+        kind: 'goo',
+      },
       {
         id: 'camera',
         text: `Camera · fov ${cameraFov(scene, h).toFixed(1)}° · eye ${Math.round(D)} px`,
@@ -604,25 +650,29 @@ export function createConfigMode(deps: ConfigDeps) {
   }
 
   // ---- picking ----
+  /** The pointer's ray in the goo's own frame, which floats, sinks and tilts: origin and direction in goo units. */
+  function gooRay(cam: CameraBasis, x: number, y: number, layout: Layout) {
+    const r = rayThrough(cam, layout.viewportW, layout.viewportH, x, y);
+    const frame = gooFrame(scene, layout, deps.pose());
+    return { o: toGooFrame(frame, r.o), v: gooFrameDir(frame, r.d) };
+  }
+
+  /** Where the pointer's ray first meets the resting putty: goo space and height above its base, or null. */
   function gooHit(cam: CameraBasis, x: number, y: number) {
     const layout = deps.layout();
     if (!layout) return null;
-    const w = layout.viewportW;
-    const h = layout.viewportH;
-    const r = rayThrough(cam, w, h, x, y);
+    const { o, v } = gooRay(cam, x, y, layout);
+    if (Math.abs(v[2]) < 1e-9) return null;
+    // March the slab between the base and a little above the plateau, 1.5 world px at a time.
     const top = params.shape.plateau * 1.8;
-    let t = r.o[2] > top ? rayZ(r.o, r.d, top) : 0;
-    const tEnd = rayZ(r.o, r.d, 0);
-    if (!Number.isFinite(t) || !Number.isFinite(tEnd)) return null;
-    const minX = layout.canvasX - w / 2;
-    const minY = layout.canvasY - h / 2;
-    for (let i = 0; i < 900 && t <= tEnd + 1.5; i++, t += 1.5) {
-      const p = add(r.o, scale(r.d, t));
-      const gx = p[0] - minX;
-      const gy = p[1] - minY;
-      if (gx < 0 || gy < 0 || gx > layout.width || gy > layout.height) continue;
-      const height = restHeightCpu(sceneSdf(layout.shapes, gx, gy, params.shape.blend));
-      if (height > 0.5 && p[2] <= height) return { x: gx, y: gy, z: p[2] };
+    const tTop = (top - o[2]) / v[2];
+    const tBase = -o[2] / v[2];
+    const tEnd = Math.max(tTop, tBase);
+    for (let i = 0, t = Math.max(Math.min(tTop, tBase), 0); i < 900 && t <= tEnd + 1.5; i++, t += 1.5) {
+      const p = add(o, scale(v, t));
+      if (p[0] < 0 || p[1] < 0 || p[0] > layout.width || p[1] > layout.height) continue;
+      const height = restHeightCpu(sceneSdf(layout.shapes, p[0], p[1], params.shape.blend));
+      if (height > 0.5 && p[2] <= height) return { x: p[0], y: p[1], z: p[2] };
     }
     return null;
   }
@@ -632,7 +682,7 @@ export function createConfigMode(deps: ConfigDeps) {
     const w = window.innerWidth;
     const h = window.innerHeight;
     const r = rayThrough(cam, w, h, x, y);
-    const target = rigTarget(deps.layout());
+    const target = rigTarget(deps.layout(), scene);
     let best = -1;
     let bestT = Infinity;
     scene.lights.forEach((l, i) => {
@@ -658,7 +708,7 @@ export function createConfigMode(deps: ConfigDeps) {
   function pickHandle(cam: CameraBasis, x: number, y: number): Handle | null {
     const w = window.innerWidth;
     const h = window.innerHeight;
-    const target = rigTarget(deps.layout());
+    const target = rigTarget(deps.layout(), scene);
     let best: Handle | null = null;
     let bestD = 18;
     scene.lights.forEach((l, i) => {
@@ -676,7 +726,7 @@ export function createConfigMode(deps: ConfigDeps) {
 
   // ---- input ----
   function moveLight(l: SceneLight, p: Vec3, distanceOnly: boolean) {
-    const off = sub(p, rigTarget(deps.layout()));
+    const off = sub(p, rigTarget(deps.layout(), scene));
     if (!distanceOnly) aimLight(l, off);
     l.distance = clamp(distanceOnly ? dot(off, normalize(l.dir)) : length(off), 150, 8000);
     deps.sceneChanged();
@@ -714,7 +764,7 @@ export function createConfigMode(deps: ConfigDeps) {
     if (handle?.kind === 'light') {
       selected = handle.index;
       gui?.controllersRecursive().forEach((c) => c.updateDisplay());
-      const p = lightPosition(scene.lights[selected], rigTarget(deps.layout()));
+      const p = lightPosition(scene.lights[selected], rigTarget(deps.layout(), scene));
       const r = rayThrough(cam, w, h, x, y);
       const t = rayPlane(r.o, r.d, p, cam.fwd);
       drag = { kind: 'light', index: selected, planePoint: p, offset: Number.isFinite(t) ? sub(p, add(r.o, scale(r.d, t))) : [0, 0, 0] };
@@ -788,12 +838,12 @@ export function createConfigMode(deps: ConfigDeps) {
         deps.sceneChanged();
         break;
       case 'press': {
+        // The finger slides across the putty at the height it pressed in, in the goo's frame as it is now.
         const layout = deps.layout();
-        const r = rayThrough(cam, w, h, x, y);
-        const t = rayZ(r.o, r.d, drag.z);
-        if (layout && Number.isFinite(t)) {
-          const p = add(r.o, scale(r.d, t));
-          deps.tracker.move(drag.id, p[0] - (layout.canvasX - w / 2), p[1] - (layout.canvasY - h / 2));
+        if (layout) {
+          const { o, v } = gooRay(cam, x, y, layout);
+          const t = Math.abs(v[2]) > 1e-9 ? (drag.z - o[2]) / v[2] : -1;
+          if (t > 0) deps.tracker.move(drag.id, o[0] + v[0] * t, o[1] + v[1] * t);
         }
         break;
       }
@@ -861,6 +911,14 @@ export function createConfigMode(deps: ConfigDeps) {
     page.add(scene.page, 'depth', 0, 3000, 1).name('depth behind (px)').listen();
     page.add(scene.page, 'fill').name('scale to fill the view').listen();
     page.add(scene.page, 'lit', 0, 1, 0.01).name('lit by scene (paper)').listen();
+
+    // The same values as the "Levitation" folder of the tuning panel (?tune).
+    const float = gui.addFolder('Levitation');
+    float.add(scene.goo, 'hover', 0, MAX_HOVER, 1).name('hover height (px)').listen();
+    float.add(params.levitation, 'travel', 0, 30, 0.5).name('press travel (px)').listen();
+    float.add(params.levitation, 'stiffness', 1, 15, 0.1).name('stiffness (Hz)').listen();
+    float.add(params.levitation, 'damping', 0.05, 1.2, 0.01).name('damping (bouncy → still)').listen();
+    float.add(params.levitation, 'tilt', 0, 1, 0.01).name('tilt toward the press').listen();
 
     const L = () => scene.lights[selected];
     const light = {
@@ -954,6 +1012,7 @@ export function createConfigMode(deps: ConfigDeps) {
     const fresh = defaultScene();
     Object.assign(scene.camera, fresh.camera);
     Object.assign(scene.page, fresh.page);
+    Object.assign(scene.goo, fresh.goo);
     scene.lights.forEach((l, i) => Object.assign(l, fresh.lights[i]));
     scene.probes = fresh.probes;
     deps.sceneChanged();

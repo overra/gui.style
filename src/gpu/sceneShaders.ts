@@ -8,6 +8,9 @@
 // curved top, out of the flat bottom (Snell again) and across the air gap to the page. A second pass draws
 // gizmo lines and dots, dimmed where the scene hides them (it reads the first pass's view depth).
 //
+// The goo has its own frame (scene.ts: gooFrame): it floats, sinks and tilts with the levitation pose. Rays are
+// marched in that frame, so the height field and its lookups stay exactly the flat shader's.
+//
 // Derivatives (LOD, normal filtering) are taken in uniform control flow: every pixel evaluates the surface at
 // its goo hit or, failing that, at its page-plane point; loops have fixed trip counts and sample with explicit
 // LOD inside their branches.
@@ -22,10 +25,10 @@ import {
   ggxSpecular,
   groundLight,
   highlightShoulder,
+  labelOver,
   linearToSrgb,
   LUMA,
   pageOnly,
-  pageTap,
   renderLayout,
   restProfile,
   surfaceAt,
@@ -76,9 +79,17 @@ export const SceneParams = d.struct({
   resolution: d.vec2f,
   /** The client viewport (CSS px) = the reference plane's extent. */
   viewportCss: d.vec2f,
-  /** The goo canvas: world xy of its top-left, and its size (CSS px). */
-  gooMin: d.vec2f,
+  /** The goo canvas' size (CSS px): the extent of goo space. */
   gooSize: d.vec2f,
+  /**
+   * The goo's own frame: world = gooOrigin + gooScale·(x·gooX + y·gooY + h·gooZ) for goo-space (x, y) and height
+   * h above its flat base (scene.ts: gooFrame).
+   */
+  gooOrigin: d.vec3f,
+  gooScale: d.f32,
+  gooX: d.vec3f,
+  gooY: d.vec3f,
+  gooZ: d.vec3f,
   planeZ: d.f32,
   /** World units per page CSS px. */
   planeScale: d.f32,
@@ -186,6 +197,35 @@ const heightAt = (g: d.v2f) => {
   return restProfile(footprint(g), d.f32(0)).x + disp;
 };
 
+/** World → goo space: (x, y, height above the goo's base). */
+const toGoo = (w: d.v3f) => {
+  'use gpu';
+  const S = sceneLayout.$.scene;
+  const r = w.sub(S.gooOrigin);
+  return d.vec3f(std.dot(r, S.gooX), std.dot(r, S.gooY), std.dot(r, S.gooZ)).div(S.gooScale);
+};
+
+/** A world direction in goo units. It keeps the world ray parameter: toGoo(o + t·v) = toGoo(o) + t·toGooDir(v). */
+const toGooDir = (v: d.v3f) => {
+  'use gpu';
+  const S = sceneLayout.$.scene;
+  return d.vec3f(std.dot(v, S.gooX), std.dot(v, S.gooY), std.dot(v, S.gooZ)).div(S.gooScale);
+};
+
+/** Goo space → world. */
+const fromGoo = (g: d.v3f) => {
+  'use gpu';
+  const S = sceneLayout.$.scene;
+  return S.gooOrigin.add(S.gooX.mul(g.x).add(S.gooY.mul(g.y)).add(S.gooZ.mul(g.z)).mul(S.gooScale));
+};
+
+/** A goo-frame direction or normal in the world. */
+const gooToWorldDir = (v: d.v3f) => {
+  'use gpu';
+  const S = sceneLayout.$.scene;
+  return S.gooX.mul(v.x).add(S.gooY.mul(v.y)).add(S.gooZ.mul(v.z));
+};
+
 /** Page canvas CSS px − the goo canvas origin (the space pageTap / pageOnly take) for a page-plane point. */
 const pageQ = (wxy: d.v2f) => {
   'use gpu';
@@ -193,29 +233,37 @@ const pageQ = (wxy: d.v2f) => {
   return wxy.div(S.planeScale).add(S.viewportCss.mul(0.5)).sub(L.$.params.canvasOrigin);
 };
 
-/** The reference-plane point the key light passes on its way to page-plane point wxy, in goo space. */
+/** Where the key light crossed the goo's (floating, tilted) base on its way to page-plane point wxy, in goo space. */
 const shadowQ = (wxy: d.v2f) => {
   'use gpu';
   const S = sceneLayout.$.scene;
   const ld = L.$.params.lightDir;
-  return wxy.add(ld.xy.mul(-S.planeZ / std.max(ld.z, 0.05))).sub(S.gooMin);
+  const p = d.vec3f(wxy, S.planeZ);
+  const t = std.dot(S.gooOrigin.sub(p), S.gooZ) / std.max(std.dot(ld, S.gooZ), 0.05);
+  return toGoo(p.add(ld.mul(t))).xy;
 };
 
+/** Where a transmitted ray meets the glass' base (goo space; the label is printed there) and the page (world xy). */
+const Landing = d.struct({ base: d.vec2f, page: d.vec2f });
+
 /**
- * Where a ray entering the goo top at w (height w.z) along dir lands on the page plane (world xy). Snell into
- * the glass, straight down to the flat bottom (the liquid intro blob lenses less, and look.ts's apparent-depth
- * standoff is kept), Snell out into the air gap, then across it.
+ * A ray entering the goo top at goo-space point g (height h) along dir, normal n (both world). Snell into the
+ * glass, straight down to the flat base in the goo's own frame (the liquid intro blob lenses less, and look.ts's
+ * apparent-depth standoff is kept), Snell out through the base, then across the air gap to the page plane.
  */
-const landing = (w: d.v3f, dir: d.v3f, n: d.v3f, eta: number) => {
+const landing = (g: d.v2f, h: number, dir: d.v3f, n: d.v3f, eta: number) => {
   'use gpu';
   const P = L.$.params;
+  const S = sceneLayout.$.scene;
   const tg = std.refract(dir, n, eta);
-  const down = std.max(-tg.z, 0.05);
-  const depth = w.z * std.mix(0.4, 1, P.materialize) + P.depthLens * P.materialize;
-  const bottom = w.xy.add(tg.xy.mul(depth / down));
-  const ta = std.refract(tg, d.vec3f(0, 0, 1), 1 / eta);
+  const tb = d.vec3f(std.dot(tg, S.gooX), std.dot(tg, S.gooY), std.dot(tg, S.gooZ));
+  const depth = h * std.mix(0.4, 1, P.materialize) + P.depthLens * P.materialize;
+  const onBase = g.add(tb.xy.mul(depth / std.max(-tb.z, 0.05)));
+  const wBase = fromGoo(d.vec3f(onBase, 0));
+  const ta = std.refract(tg, S.gooZ, 1 / eta);
   const exit = std.select(tg, ta, std.dot(ta, ta) > 0.25);
-  return bottom.add(exit.xy.mul(-sceneLayout.$.scene.planeZ / std.max(-exit.z, 0.05)));
+  const onPage = wBase.xy.add(exit.xy.mul(std.max(wBase.z - S.planeZ, 0) / std.max(-exit.z, 0.05)));
+  return Landing({ base: onBase, page: onPage });
 };
 
 // ───────────────────────────── lighting for matte things ─────────────────────────────
@@ -327,15 +375,15 @@ const chromeEnv = (o: d.v3f, r: d.v3f) => {
 
 // ───────────────────────────── the goo along a real view ray ─────────────────────────────
 
-/** shadeGoo from renderShader.ts, with the view ray `dir` instead of (0, 0, −1). */
+/** shadeGoo from renderShader.ts, with the view ray `dir` instead of (0, 0, −1); g, h: the hit in goo space. */
 const shadeGoo3d = (
-  w: d.v3f,
+  g: d.v2f,
+  h: number,
   dir: d.v3f,
   n: d.v3f,
   sg: d.v4f,
   H: number,
   haze: number,
-  g: d.v2f,
   lod: number,
   fwR: number,
   a2Filter: number,
@@ -344,27 +392,34 @@ const shadeGoo3d = (
   const P = L.$.params;
   const S = sceneLayout.$.scene;
   const v = dir.mul(-1);
-  // Transmitted: the page where each channel's ray lands, lit by the light reaching it there.
-  const lG = landing(w, dir, n, 1 / P.iorG);
-  const lR = landing(w, dir, n, 1 / std.mix(P.iorG, P.iorR, P.materialize));
-  const lB = landing(w, dir, n, 1 / std.mix(P.iorG, P.iorB, P.materialize));
-  const cG = pageTap(pageQ(lG), lod);
+  // Transmitted: each channel's ray picks up the label on the glass' base, then the page where it lands across the
+  // air gap, lit by the light reaching it there.
+  const lG = landing(g, h, dir, n, 1 / P.iorG);
+  const lR = landing(g, h, dir, n, 1 / std.mix(P.iorG, P.iorR, P.materialize));
+  const lB = landing(g, h, dir, n, 1 / std.mix(P.iorG, P.iorB, P.materialize));
+  const cG = labelOver(pageOnly(pageQ(lG.page), lod), lG.base, lod);
   let col = d.vec3f(cG);
-  const spread = std.smoothstep(0.05, 0.25, (std.length(lB.sub(lR)) / S.planeScale) * S.dpr);
+  const spread = std.smoothstep(0.05, 0.25, (std.length(lB.page.sub(lR.page)) / S.planeScale) * S.dpr);
   if (spread > 0) {
-    const split = d.vec3f(pageTap(pageQ(lR), lod).x, cG.y, pageTap(pageQ(lB), lod).z);
+    const split = d.vec3f(
+      labelOver(pageOnly(pageQ(lR.page), lod), lR.base, lod).x,
+      cG.y,
+      labelOver(pageOnly(pageQ(lB.page), lod), lB.base, lod).z,
+    );
     col = std.mix(cG, split, spread);
   }
-  let trans = col.mul(groundLight(shadowQ(lG))).mul(paperLight(d.vec3f(lG, S.planeZ)));
+  let trans = col.mul(groundLight(shadowQ(lG.page))).mul(paperLight(d.vec3f(lG.page, S.planeZ)));
   const tz = std.max(-std.refract(dir, n, 1 / P.iorG).z, 0.2);
   trans = trans.mul(std.exp(P.absorb.mul(-H * (1 / tz + 1))));
   const Y = std.dot(trans, LUMA.$);
   trans = std.max(std.mix(d.vec3f(Y), trans, P.saturation), d.vec3f(0));
   trans = std.mix(trans, d.vec3f(1), P.lift + 0.035 * haze);
-  // Reflection and the sun glint (the studio as seen from the goo, exactly as in the flat shader).
+  // Reflection and the sun glint (the studio as seen from the goo, exactly as in the flat shader). A downward
+  // reflection sees the page past the glass and the air gap under its base.
   const shine = 0.35 + 0.65 * P.materialize;
   const F = fresnelSchlick(std.dot(n, v), 0.04);
-  const refl = env(std.reflect(dir, n), g, H, fwR).mul(F * shine);
+  const gap = std.max(fromGoo(d.vec3f(g, 0)).z - S.planeZ, 0);
+  const refl = env(std.reflect(dir, n), g, H + gap, fwR).mul(F * shine);
   const spec = P.lightColor.mul(
     ggxSpecular(n, v, P.lightDir, P.roughness + P.hazeRoughness * haze, a2Filter, P.sunRadius) * shine,
   );
@@ -407,14 +462,12 @@ export const sceneFragment = tgpu.fragmentFn({
   const fade = std.exp(-std.length(wPlane.xy) / (2.5 * S.viewportCss.x)) * std.saturate(-dir.z * 4);
   const grid = (1 - std.saturate(std.min(gl.x, gl.y))) * fade;
 
-  // Goo: march the thickness through its bounding box, then bisect.
-  const safe = std.select(dir, d.vec3f(1e-6), std.lt(std.abs(dir), d.vec3f(1e-6)));
-  const span = rayBox(
-    eye,
-    d.vec3f(1).div(safe),
-    d.vec3f(S.gooMin.x, S.gooMin.y, 0),
-    d.vec3f(S.gooMin.x + S.gooSize.x, S.gooMin.y + S.gooSize.y, S.gooTop),
-  );
+  // Goo: march its thickness through its bounding box, in its own frame (it may float, sink and tilt), then bisect.
+  // The world ray parameter t carries over to goo space unchanged.
+  const ob = toGoo(eye);
+  const db = toGooDir(dir);
+  const safe = std.select(db, d.vec3f(1e-6), std.lt(std.abs(db), d.vec3f(1e-6)));
+  const span = rayBox(ob, d.vec3f(1).div(safe), d.vec3f(0), d.vec3f(S.gooSize, S.gooTop));
   const ta = std.max(span.x, 0);
   const tb = std.max(span.y, ta);
   const inBox = span.y > ta;
@@ -424,9 +477,9 @@ export const sceneFragment = tgpu.fragmentFn({
   for (let i = 1; i <= MARCH; i++) {
     if (inBox && !found) {
       const t = std.mix(ta, tb, d.f32(i) / d.f32(MARCH));
-      const w = eye.add(dir.mul(t));
-      const h = heightAt(w.xy.sub(S.gooMin));
-      if (w.z <= h && h > P.filmEps) {
+      const b = ob.add(db.mul(t));
+      const h = heightAt(b.xy);
+      if (b.z <= h && h > P.filmEps) {
         found = true;
         tHi = t;
       } else {
@@ -437,9 +490,9 @@ export const sceneFragment = tgpu.fragmentFn({
   for (let i = 0; i < 6; i++) {
     if (found) {
       const t = (tLo + tHi) * 0.5;
-      const w = eye.add(dir.mul(t));
-      const h = heightAt(w.xy.sub(S.gooMin));
-      if (w.z <= h && h > P.filmEps) {
+      const b = ob.add(db.mul(t));
+      const h = heightAt(b.xy);
+      if (b.z <= h && h > P.filmEps) {
         tHi = t;
       } else {
         tLo = t;
@@ -448,17 +501,19 @@ export const sceneFragment = tgpu.fragmentFn({
   }
   const tGoo = std.select(d.f32(BIG), tHi, found);
 
-  // Surface terms that need derivatives, for every pixel (at its goo hit, else at its page-plane point).
-  const wHit = std.select(wPlane, eye.add(dir.mul(tHi)), found);
-  const g = wHit.xy.sub(S.gooMin);
+  // Surface terms that need derivatives, for every pixel (at its goo hit, else below its page-plane point).
+  const bHit = std.select(toGoo(wPlane), ob.add(db.mul(tHi)), found);
+  const g = bHit.xy;
+  const hHit = std.max(bHit.z, 0);
   const surf = surfaceAt(g);
-  const qG = pageQ(landing(wHit, dir, surf.n, 1 / P.iorG));
+  const nW = gooToWorldDir(surf.n);
+  const qG = pageQ(landing(g, hHit, dir, nW, 1 / P.iorG).page);
   const fq = std.fwidth(qG).mul(texPerCss);
   const lodLens = std.clamp(std.log2(std.max(std.max(fq.x, fq.y), 1)), 0, P.lodMax);
   const lod = lodLens + P.rimLod * (1 - std.smoothstep(0, 6, -surf.sg.x)) + P.hazeLod * surf.haze;
-  const fwR = std.length(std.fwidth(std.reflect(dir, surf.n)));
-  const dndx = std.dpdx(surf.n);
-  const dndy = std.dpdy(surf.n);
+  const fwR = std.length(std.fwidth(std.reflect(dir, nW)));
+  const dndx = std.dpdx(nW);
+  const dndy = std.dpdy(nW);
   const a2Filter = std.min(0.5 * (std.dot(dndx, dndx) + std.dot(dndy, dndy)), 0.18);
 
   // Everything else, nearest first.
@@ -471,7 +526,7 @@ export const sceneFragment = tgpu.fragmentFn({
   let col = backdrop(dir, grid);
   if (tSolid < BIG * 0.5) {
     if (tGoo <= tSolid) {
-      col = highlightShoulder(shadeGoo3d(wHit, dir, surf.n, surf.sg, surf.H, surf.haze, g, lod, fwR, a2Filter));
+      col = highlightShoulder(shadeGoo3d(g, hHit, dir, nW, surf.sg, surf.H, surf.haze, lod, fwR, a2Filter));
     } else if (tPage <= tSolid) {
       col = pageOnly(pageQ(wPlane.xy), lodPlane).mul(groundLight(shadowQ(wPlane.xy))).mul(paperLight(wPlane));
     } else if (tA <= tSolid) {

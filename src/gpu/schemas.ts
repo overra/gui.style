@@ -148,5 +148,18 @@ export const GlassParams = d.struct({
   imprintGain: d.f32,
   ridgeGain: d.f32,
   hazeGain: d.f32,
+  /**
+   * Levitation, folded into the flat overlay (the 3D view traces it): the air gap under the pivot (CSS px; 0 =
+   * resting on the page), page px per world px across it (a pushed-back page looks smaller), the base's tilt (it
+   * sits tilt·(p − pivot) lower at p), the goo-space pivot, and the shadow's parallax per px from the view center
+   * (the camera sees the page further away than the goo).
+   */
+  gap: d.f32,
+  gapScale: d.f32,
+  tilt: d.vec2f,
+  pivot: d.vec2f,
+  parallax: d.f32,
+  /** Extra penumbra (CSS px) the gap adds to every edge of the light on the page (both modes). */
+  gapBlur: d.f32,
   softboxes: d.arrayOf(Softbox, 3),
 });

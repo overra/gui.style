@@ -441,6 +441,13 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
       imprintGain: visual.imprintGain,
       ridgeGain: visual.ridgeGain,
       hazeGain: visual.hazeGain,
+      // Resting on the page; the scene hook fills these in while the button floats.
+      gap: 0,
+      gapScale: 1,
+      tilt: d.vec2f(),
+      pivot: s0 ? d.vec2f(s0.cx, s0.cy) : d.vec2f(),
+      parallax: 0,
+      gapBlur: 0,
       softboxes: look.softboxes.map((b) => ({
         c: d.vec3f(...b.c),
         t: d.vec3f(...b.t),
