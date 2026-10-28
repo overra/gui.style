@@ -12,9 +12,10 @@ export interface GooShape {
 }
 
 export interface Layout {
+  /** Size of the page canvas box (CSS px); the glass refracts that canvas. */
   viewportW: number;
   viewportH: number;
-  /** The goo canvas in viewport CSS px. */
+  /** The goo canvas' top-left, relative to the page canvas (CSS px). Scrolling doesn't change it. */
   canvasX: number;
   canvasY: number;
   width: number;
@@ -49,7 +50,7 @@ export function sceneSdf(shapes: GooShape[], x: number, y: number, blend: number
   return d;
 }
 
-export function measureLayout(canvas: HTMLCanvasElement, elements: HTMLElement[], cell: number): Layout {
+export function measureLayout(canvas: HTMLCanvasElement, elements: HTMLElement[], cell: number, page: DOMRect): Layout {
   const c = canvas.getBoundingClientRect();
   const shapes: GooShape[] = elements.map((element) => {
     const r = element.getBoundingClientRect();
@@ -59,10 +60,10 @@ export function measureLayout(canvas: HTMLCanvasElement, elements: HTMLElement[]
     return { cx: r.left - c.left + hx, cy: r.top - c.top + hy, hx, hy, radius, element };
   });
   return {
-    viewportW: window.innerWidth,
-    viewportH: window.innerHeight,
-    canvasX: c.left,
-    canvasY: c.top,
+    viewportW: page.width,
+    viewportH: page.height,
+    canvasX: c.left - page.left,
+    canvasY: c.top - page.top,
     width: c.width,
     height: c.height,
     shapes,

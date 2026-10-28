@@ -31,14 +31,15 @@ html {
 
 body {
   margin: 0;
+  position: relative;
 }
 
+/* The page art scrolls with the content, so the glass and the page it refracts never drift apart. */
 #page-bg {
-  position: fixed;
+  position: absolute;
   inset: 0;
-  width: 100vw;
-  height: 100vh;
-  height: 100lvh;
+  width: 100%;
+  height: 100%;
   z-index: -1;
   display: block;
   pointer-events: none;
@@ -190,6 +191,33 @@ h1 {
   font-size: 0.9rem;
   line-height: 1.4;
   color: var(--ink-soft);
+}
+
+/* Opens the tuning panel. */
+.tweak {
+  position: fixed;
+  right: max(16px, env(safe-area-inset-right));
+  bottom: max(16px, env(safe-area-inset-bottom));
+  z-index: 3;
+  padding: 9px 15px;
+  border: 1px solid color-mix(in srgb, var(--ink) 16%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--page) 72%, transparent);
+  backdrop-filter: blur(10px) saturate(150%);
+  -webkit-backdrop-filter: blur(10px) saturate(150%);
+  color: var(--ink);
+  font: 600 0.85rem/1 var(--font);
+  cursor: pointer;
+}
+
+.tweak:hover {
+  background: color-mix(in srgb, var(--page) 88%, transparent);
+}
+
+.tweak:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px #0b0d12;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -182,7 +182,7 @@ const heightAt = (g: d.v2f) => {
   'use gpu';
   const P = L.$.params;
   const size = d.vec2f(std.textureDimensions(L.$.sim, 0));
-  const disp = std.textureSampleLevel(L.$.sim, L.$.smp, g.div(P.simCell).div(size), 0).x;
+  const disp = std.textureSampleLevel(L.$.sim, L.$.smp, g.div(P.simCell).div(size), 0).x * P.imprintGain;
   return restProfile(footprint(g), d.f32(0)).x + disp;
 };
 
@@ -370,7 +370,7 @@ const shadeGoo3d = (
   );
   const cL = std.dot(std.normalize(sg.yz.add(d.vec2f(1e-6, 0))), std.normalize(P.lightDir.xy));
   const lobe = std.max(cL, 0) ** 2 + P.glintOpposite * std.max(-cL, 0) ** 2;
-  const glint = P.glint * lobe * std.exp(-std.max(-sg.x, 0) / P.glintWidth) * shine;
+  const glint = P.glint * lobe * std.exp(-std.abs(sg.x) / P.glintWidth) * shine;
   const gd = g.sub(P.glowCenter);
   const glow = P.glowAmount * std.exp(-std.dot(gd, gd) / (2 * P.glowRadius * P.glowRadius));
   return trans

@@ -144,5 +144,9 @@ export const GlassParams = d.struct({
   glowRadius: d.f32,
   /** 0 → 1 as the dropped goo sets into glass. */
   materialize: d.f32,
+  /** Shader-only exaggeration of the dents, the fingerprint ridges and the touch smudge. */
+  imprintGain: d.f32,
+  ridgeGain: d.f32,
+  hazeGain: d.f32,
   softboxes: d.arrayOf(Softbox, 3),
 });

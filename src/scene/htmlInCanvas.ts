@@ -54,7 +54,9 @@ export function createUiPlane(
   canvas.className = 'scene-ui-canvas';
   // A drawable's canvas needs a rendering context before its elements can be drawn anywhere.
   canvas.getContext('2d');
-  const placeholder = document.createComment('stage (drawn in the 3D scene)');
+  // Holds the element's place in the page flow, so the page box (and the page canvas sized to it) doesn't collapse.
+  const placeholder = document.createElement('div');
+  placeholder.setAttribute('aria-hidden', 'true');
   let tex: UiTexture | null = null;
   let attached = false;
   let savedWidth = '';
@@ -99,8 +101,10 @@ export function createUiPlane(
     attached = true;
     size();
     // Children of a drawable canvas shrink-wrap; keep the page's own width so the UI doesn't reflow.
+    const box = element.getBoundingClientRect();
     savedWidth = element.style.width;
-    element.style.width = `${element.getBoundingClientRect().width}px`;
+    element.style.width = `${box.width}px`;
+    placeholder.style.height = `${box.height}px`;
     element.before(placeholder);
     element.setAttribute('drawable', '');
     placeholder.before(canvas);

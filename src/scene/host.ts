@@ -9,7 +9,7 @@ import type { Layout } from '../layout.ts';
 import { looks } from '../look.ts';
 import type { FingerTracker } from '../touches.ts';
 import type { ConfigMode } from './configMode.ts';
-import { defaultScene, glassDepthTerms, glassLights, pageForeshortening, type Scene } from './scene.ts';
+import { defaultScene, glassDepthTerms, glassLights, type Scene } from './scene.ts';
 import './scene.css';
 
 export interface SceneHostDeps {
@@ -36,17 +36,10 @@ export function createSceneHost(deps: SceneHostDeps) {
   const glassHook = (values: GlassInput, theme: Theme): GlassInput => ({
     ...values,
     ...glassLights(scene, theme),
-    ...glassDepthTerms(scene, looks[theme], values),
+    ...glassDepthTerms(scene, looks[theme]),
   });
 
-  /** A page that keeps its size while pushed back is seen smaller: scale the page canvas to match. */
-  function applyPageTransform() {
-    const k = scene.page.fill || scene.page.depth <= 0 ? 1 : pageForeshortening(scene);
-    deps.pageBg.style.transform = k === 1 ? '' : `scale(${k})`;
-  }
-
   function sceneChanged() {
-    applyPageTransform();
     deps.wake();
   }
 
@@ -136,7 +129,7 @@ export function createSceneHost(deps: SceneHostDeps) {
     /** Dev aids: __goo.scene.* */
     dev: {
       scene,
-      /** Call after editing `scene` by hand (re-applies the page transform, wakes the loop). */
+      /** Call after editing `scene` by hand (wakes the loop). */
       changed: sceneChanged,
       enter: () => setActive(true),
       exit: () => setActive(false),

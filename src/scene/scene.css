@@ -1,8 +1,9 @@
 /* Config mode (the 3D scene view). Everything here is inert until the view is opened. */
 
+/* Bottom-left: the "Tweak the goo" button owns the bottom-right corner. */
 .scene-toggle {
   position: fixed;
-  right: max(16px, env(safe-area-inset-right));
+  left: max(16px, env(safe-area-inset-left));
   bottom: max(16px, env(safe-area-inset-bottom));
   z-index: 30;
   min-height: 36px;

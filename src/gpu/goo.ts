@@ -3,6 +3,7 @@
 
 import { common, d, type TgpuRoot } from 'typegpu';
 import type { Theme } from '../background.ts';
+import type { Effective } from '../feel.ts';
 import { sceneSdf, sameGrid, type GooShape, type Layout } from '../layout.ts';
 import { looks } from '../look.ts';
 import { params, restHeightCpu } from '../params.ts';
@@ -31,6 +32,8 @@ export interface FrameInput {
   reducedMotion: boolean;
   /** Seconds since the goo was dropped onto the page (large when there's no intro). */
   sinceIntro: number;
+  /** Physical and visual knobs after the feel macros (feel.ts). */
+  eff: Effective;
 }
 
 type FingerData = d.InferInput<typeof Finger>;
@@ -367,7 +370,7 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
       count++;
       if (pressing && f.downAt > newest) {
         newest = f.downAt;
-        const hold = now - f.downAt;
+        const hold = Math.max(0, now - f.downAt);
         glow.x = f.x;
         glow.y = f.y;
         glow.radius = f.ay * (0.6 + 1.0 * (1 - Math.exp(-hold / 0.25)));
@@ -381,7 +384,7 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
     return count;
   }
 
-  function writeGlass(setF: number) {
+  function writeGlass(setF: number, visual: Effective['visual']) {
     if (!layout) return;
     const look = looks[theme];
     const s0 = layout.shapes[0];
@@ -435,6 +438,9 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
       glowCenter: d.vec2f(glow.x, glow.y),
       glowRadius: glow.radius,
       materialize: setF,
+      imprintGain: visual.imprintGain,
+      ridgeGain: visual.ridgeGain,
+      hazeGain: visual.hazeGain,
       softboxes: look.softboxes.map((b) => ({
         c: d.vec3f(...b.c),
         t: d.vec3f(...b.t),
@@ -449,19 +455,19 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
     glassUniform.write(glassHook ? glassHook(values, theme) : values);
   }
 
-  function frame({ dt, tracker, reducedMotion, sinceIntro, now }: FrameInput) {
+  function frame({ dt, tracker, reducedMotion, sinceIntro, now, eff }: FrameInput) {
     if (!sim || !bound || !renderGroup || !layout) return;
     const { substep, maxSubsteps } = params.sim;
 
     // Intro: the dropped blob slumps as a liquid, then sets into putty (thixotropic build-up).
     const intro = params.intro;
     const setF = sinceIntro < intro.liquidFor ? 0 : 1 - Math.exp(-(sinceIntro - intro.liquidFor) / intro.setTau);
-    const pl = params.plastic;
-    const el = params.elastic;
-    const fluxDamping = intro.liquidDamping + (pl.fluxDamping - intro.liquidDamping) * setF;
+    const pl = eff.plastic;
+    const el = eff.elastic;
+    const fluxDamping = eff.introDamping + (pl.fluxDamping - eff.introDamping) * setF;
     // Reduced motion: critically damped elastic layer (no wobble) and quicker healing.
     const zeta = reducedMotion ? 1 : el.zeta;
-    const heal = params.heal;
+    const heal = eff.heal;
 
     accumulator += dt;
     const steps = Math.min(maxSubsteps, Math.floor(accumulator / substep));
@@ -495,19 +501,21 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
       pad2: 0,
     });
 
-    const det = params.detail;
+    const det = eff.detail;
+    const fade = Math.exp(-dt / (reducedMotion ? det.fadeTau * 0.6 : det.fadeTau));
     detailUniform.write({
       texel: det.texel,
       period: det.period,
       depth: det.depth,
       stamp: 1 - Math.exp(-dt / det.stampTau),
-      fade: Math.exp(-dt / (reducedMotion ? det.fadeTau * 0.6 : det.fadeTau)),
-      smoothing: Math.min(0.03, det.smoothing * dt),
+      fade,
+      // Biharmonic leveling: |fade − 64·c| < 1 keeps even the finest (checkerboard) mode decaying, never flipping.
+      smoothing: Math.min(det.smoothing * dt, (0.95 * (1 + fade)) / 64),
       hazeFade: Math.exp(-dt / det.hazeTau),
       fingerCount,
       pxCss: 1 / scale,
     });
-    writeGlass(setF);
+    writeGlass(setF, eff.visual);
 
     const encoder = root['~unstable'].createCommandEncoder();
     const pass = encoder.beginComputePass();
@@ -535,6 +543,12 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
     encoder.submit();
   }
 
+  /** Compiles every pipeline up front (rejects if the device refuses one), instead of on the first frame. */
+  async function ready() {
+    await Promise.all([...Object.values(pipes), renderPipe].map((p) => p.initAsync()));
+  }
+
+
   /** Lets the scene rewrite the glass uniforms (null restores look.ts as is). */
   function setGlassHook(hook: typeof glassHook) {
     glassHook = hook;
@@ -559,7 +573,19 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
     };
   }
 
-  return { setLayout, setPage, setLabel, setViewport, replayDrop, snapToRest, surfaceAt, frame, setGlassHook, sceneResources };
+  return {
+    ready,
+    setLayout,
+    setPage,
+    setLabel,
+    setViewport,
+    replayDrop,
+    snapToRest,
+    surfaceAt,
+    frame,
+    setGlassHook,
+    sceneResources,
+  };
 }
 
 export type Goo = ReturnType<typeof createGoo>;

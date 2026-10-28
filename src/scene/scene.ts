@@ -192,9 +192,10 @@ function shadowReachFor(scene: Scene, look: Look): number {
  * Normal mode, page pushed back: the flat overlay approximates the air gap. Paraxially a gap g under the glass
  * bends rays like iorG·g of extra glass, and the camera sees the page foreshortened by D / (D + g); the shadow
  * spreads and fades, and contact occlusion disappears. The goo canvas only reaches --goo-m past the button, so
- * the shadow is not displaced the full distance (config view traces it exactly).
+ * the shadow is not displaced the full distance (config view traces it exactly). Normal mode always shows the page
+ * filling the view: an unscaled ("fixed") page is only drawn smaller in the config view.
  */
-export function glassDepthTerms(scene: Scene, look: Look, values: GlassInput): Partial<GlassInput> {
+export function glassDepthTerms(scene: Scene, look: Look): Partial<GlassInput> {
   const out: Partial<GlassInput> = {};
   const reach = shadowReachFor(scene, look);
   if (reach !== look.shadowReach) out.shadowReach = reach;
@@ -208,15 +209,6 @@ export function glassDepthTerms(scene: Scene, look: Look, values: GlassInput): P
   // The caustic model assumes the page touches the glass; away from it the focus smears out.
   out.causticC = look.causticC * Math.exp(-g / 120);
   out.causticAdd = look.causticAdd * Math.exp(-g / 120);
-  if (!scene.page.fill) {
-    // The page keeps its size, so the camera sees it scaled by k about the viewport center (the page canvas gets
-    // the same CSS scale). Page lookups map screen → page px through these two uniforms; the reflection eye
-    // (viewport / 2 − canvasOrigin) comes out unchanged.
-    const vw = values.viewport as d.v2f;
-    const co = values.canvasOrigin as d.v2f;
-    out.viewport = d.vec2f(vw.x * k, vw.y * k);
-    out.canvasOrigin = d.vec2f(co.x - (vw.x / 2) * (1 - k), co.y - (vw.y / 2) * (1 - k));
-  }
   return out;
 }
 

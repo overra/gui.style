@@ -1,5 +1,7 @@
+import type GUI from 'lil-gui';
 import { tgpu } from 'typegpu';
 import { paintLabel, paintPage, type Theme } from './background.ts';
+import { effectiveParams } from './feel.ts';
 import { createGoo, type Goo } from './gpu/goo.ts';
 import { attachInput } from './input.ts';
 import { measureLayout, type Layout } from './layout.ts';
@@ -9,6 +11,7 @@ import { createSceneHost } from './scene/host.ts';
 import { FingerTracker } from './touches.ts';
 
 const MAX_DPR = 2;
+const NO_WEBGPU = 'WebGPU isn’t available here, so this is a static stand-in. Try a recent Chrome, Edge or Safari.';
 
 const pageBg = document.getElementById('page-bg') as HTMLCanvasElement;
 const gooWrap = document.querySelector('.goo') as HTMLElement;
@@ -16,6 +19,7 @@ const gooCanvas = gooWrap.querySelector('canvas') as HTMLCanvasElement;
 const buttons = [...gooWrap.querySelectorAll<HTMLElement>('[data-goo]')];
 const status = document.getElementById('status');
 const support = document.getElementById('support');
+const tweak = document.getElementById('tweak') as HTMLButtonElement | null;
 
 const darkQuery = matchMedia('(prefers-color-scheme: dark)');
 const motionQuery = matchMedia('(prefers-reduced-motion: reduce)');
@@ -26,9 +30,13 @@ let virtualNow: number | null = null;
 const clock = () => virtualNow ?? performance.now() / 1000;
 
 // ---- page background (always a plain 2D canvas, with or without WebGPU) ----
+// It is painted at its own CSS box, and the glass maps into that same box, so what is refracted always lines up
+// with what is around it (mobile toolbars, pinch-zoom and scrolling included).
 const pageScale = () => Math.min(window.devicePixelRatio || 1, MAX_DPR);
+const pageBox = () => pageBg.getBoundingClientRect();
 function repaintPage() {
-  paintPage(pageBg, { width: window.innerWidth, height: window.innerHeight, scale: pageScale(), theme: theme() });
+  const { width, height } = pageBox();
+  paintPage(pageBg, { width, height, scale: pageScale(), theme: theme() });
 }
 repaintPage();
 
@@ -45,10 +53,13 @@ for (const b of buttons) {
   });
 }
 
-function explain(reason: string) {
+/** Falls back to the static CSS button; `message` (if any) tells the visitor why. */
+function explain(reason: string, message: string | null = NO_WEBGPU) {
   console.info('[goo] showing the static button:', reason);
-  if (support) {
-    support.textContent = 'WebGPU isn’t available here, so this is a static stand-in. Try a recent Chrome, Edge or Safari.';
+  gooWrap.classList.remove('is-live');
+  if (tweak) tweak.hidden = true;
+  if (support && message) {
+    support.textContent = message;
     support.hidden = false;
   }
 }
@@ -99,7 +110,7 @@ function relayout() {
     gooCanvas.width = w;
     gooCanvas.height = h;
   }
-  layout = measureLayout(gooCanvas, buttons, params.sim.cell);
+  layout = measureLayout(gooCanvas, buttons, params.sim.cell, pageBox());
   // Drop the goo onto the page the first time it appears (unless motion is reduced).
   const drop = !dropped && !motionQuery.matches;
   if (drop) droppedAt = clock();
@@ -113,11 +124,13 @@ function refreshPage() {
   goo?.setPage(pageBg, theme());
 }
 
+/** The goo moved relative to the page (layout shift) or the page box changed size. */
 function track() {
   if (!goo || !layout || sceneHost.holdsLayout) return;
   const r = gooCanvas.getBoundingClientRect();
-  goo.setViewport(r.left, r.top, window.innerWidth, window.innerHeight);
-  layout = { ...layout, canvasX: r.left, canvasY: r.top, viewportW: window.innerWidth, viewportH: window.innerHeight };
+  const p = pageBox();
+  layout = { ...layout, canvasX: r.left - p.left, canvasY: r.top - p.top, viewportW: p.width, viewportH: p.height };
+  goo.setViewport(layout.canvasX, layout.canvasY, p.width, p.height);
 }
 
 // ---- frame loop: runs while anything moves, sleeps once the goo has healed ----
@@ -132,12 +145,21 @@ const frame = (ms: number) => {
   const dt = lastFrame ? Math.min(now - lastFrame, 1 / 20) : 1 / 60;
   lastFrame = now;
 
+  const eff = effectiveParams();
+  tracker.setTuning(eff.finger);
   tracker.update(now, dt, goo.surfaceAt);
   if (tracker.busy || sceneHost.busy) quietSince = now;
-  const sleeping = now - quietSince >= params.sleepAfter;
+  // Sleep only once every imprint, ridge and smudge has visibly healed under the current feel settings.
+  const settle = Math.max(
+    params.sleepAfter,
+    eff.heal.hold + eff.heal.ramp + 5 * eff.heal.tau,
+    5 * eff.detail.fadeTau,
+    5 * eff.detail.hazeTau,
+  );
+  const sleeping = now - quietSince >= settle;
   // Going to sleep: snap exactly back to the pristine shape and draw it once.
   if (sleeping) goo.snapToRest();
-  goo.frame({ now, dt, tracker, reducedMotion: motionQuery.matches, sinceIntro: now - droppedAt });
+  goo.frame({ now, dt, tracker, reducedMotion: motionQuery.matches, sinceIntro: now - droppedAt, eff });
   sceneHost.frame(now);
   tracker.endFrame();
   afterFrame?.();
@@ -147,15 +169,24 @@ const frame = (ms: number) => {
   else if (virtualNow === null) rafId = requestAnimationFrame(frame);
 };
 
+/** Something moved the goo: simulate until it has healed again. */
 const wake = () => {
   quietSince = clock();
+  if (!rafId && virtualNow === null) rafId = requestAnimationFrame(frame);
+};
+
+/** Only the picture changed (resize, theme, fonts): draw once, without restarting the simulation. */
+const redraw = () => {
   if (!rafId && virtualNow === null) rafId = requestAnimationFrame(frame);
 };
 
 attachInput({
   tracker,
   buttons,
-  toGoo: (x, y) => ({ x: x - (layout?.canvasX ?? 0), y: y - (layout?.canvasY ?? 0) }),
+  toGoo: (x, y) => {
+    const r = gooCanvas.getBoundingClientRect();
+    return { x: x - r.left, y: y - r.top };
+  },
   centerOf: (button) => {
     const s = layout?.shapes.find((sh) => sh.element === button);
     return s ? { x: s.cx, y: s.cy } : null;
@@ -184,23 +215,9 @@ const sceneHost = createSceneHost({
 let losses: number[] = [];
 
 async function start() {
-  if (forcedColors.matches) return explain('forced colors are active');
+  if (forcedColors.matches) return explain('forced colors are active', null);
   const device = await requestDevice();
   if (!device) return explain('no WebGPU adapter');
-  const root = tgpu.initFromDevice({ device });
-  try {
-    goo = createGoo(root, gooCanvas);
-    sceneHost.attach(goo, root);
-    refreshPage();
-    relayout();
-  } catch (err) {
-    goo = null;
-    console.error(err);
-    return explain('the GPU pipeline failed to build');
-  }
-  wake();
-  // Reveal the glass only once its first frame has landed (the CSS button stays until then).
-  void device.queue.onSubmittedWorkDone().then(() => gooWrap.classList.add('is-live'));
 
   void device.lost.then((info) => {
     gooWrap.classList.remove('is-live');
@@ -209,9 +226,52 @@ async function start() {
     if (info.reason === 'destroyed') return;
     const t = clock();
     losses = losses.filter((x) => t - x < 60).concat(t);
-    if (losses.length >= 3) return explain('the GPU device keeps getting lost');
+    if (losses.length >= 3) {
+      return explain('the GPU device keeps getting lost', 'The GPU stopped responding, so this is a static stand-in.');
+    }
     setTimeout(() => void start(), 300 * losses.length);
   });
+
+  // Prove the whole GPU path — pipelines, uploads and a first rendered frame — before hiding the CSS button.
+  const scopes = ['validation', 'out-of-memory', 'internal'] as const;
+  for (const s of scopes) device.pushErrorScope(s);
+  let failure: unknown = null;
+  try {
+    const root = tgpu.initFromDevice({ device });
+    const next = createGoo(root, gooCanvas);
+    await next.ready();
+    goo = next;
+    sceneHost.attach(next, root);
+    refreshPage();
+    relayout();
+    quietSince = clock();
+    frame(performance.now());
+  } catch (err) {
+    failure = err;
+  }
+  const errors = await Promise.all(scopes.map(() => device.popErrorScope()));
+  failure ??= errors.find(Boolean) ?? null;
+  if (failure || !goo) {
+    console.error(failure);
+    goo = null;
+    sceneHost.detach();
+    device.destroy();
+    return explain('the GPU pipeline failed to build', 'The GPU couldn’t build this effect, so this is a static stand-in.');
+  }
+  await device.queue.onSubmittedWorkDone();
+  if (!goo) return;
+  gooWrap.classList.add('is-live');
+  if (tweak) tweak.hidden = false;
+  device.addEventListener(
+    'uncapturederror',
+    (e) => {
+      console.error((e as GPUUncapturedErrorEvent).error);
+      goo = null;
+      sceneHost.detach();
+      explain('GPU error while rendering', 'The GPU hit an error, so this is a static stand-in.');
+    },
+    { once: true },
+  );
 }
 
 function dropAgain() {
@@ -220,37 +280,64 @@ function dropAgain() {
   wake();
 }
 
-// ?tune opens a live tuning panel (loaded on demand, so it costs nothing otherwise).
-if (new URLSearchParams(location.search).has('tune')) {
-  void import('./tuning.ts').then(({ openTuning }) =>
+// The tuning panel loads on demand (the "Tweak the goo" button, or ?tune in the URL).
+let guiPromise: Promise<GUI> | null = null;
+let guiOpen = false;
+async function toggleTuning(open = !guiOpen) {
+  guiOpen = open;
+  tweak?.setAttribute('aria-expanded', String(open));
+  guiPromise ??= import('./tuning.ts').then(({ openTuning }) =>
     openTuning({ theme, wake, replayDrop: dropAgain, tap: () => buttons[0]?.click() }),
   );
+  try {
+    (await guiPromise).show(guiOpen);
+  } catch (err) {
+    guiPromise = null; // let a later click retry the chunk load
+    console.error(err);
+  }
 }
+tweak?.addEventListener('click', () => void toggleTuning());
+if (new URLSearchParams(location.search).has('tune')) void toggleTuning(true);
 
-new ResizeObserver(() => relayout()).observe(gooCanvas);
-window.addEventListener('resize', () => {
+// Resizing a canvas clears it, so every size change redraws.
+const onViewport = () => {
+  refreshPage();
+  relayout();
+  track();
+  redraw();
+};
+window.addEventListener('resize', onViewport);
+// Zoom or a move to another display changes the device-pixel ratio without resizing anything in CSS px.
+const watchDpr = () =>
+  matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener(
+    'change',
+    () => {
+      watchDpr();
+      onViewport();
+    },
+    { once: true },
+  );
+watchDpr();
+new ResizeObserver(() => {
+  relayout();
+  redraw();
+}).observe(gooCanvas);
+new ResizeObserver(() => {
   refreshPage();
   track();
-  wake();
-});
-window.addEventListener(
-  'scroll',
-  () => {
-    track();
-    wake();
-  },
-  { passive: true, capture: true },
-);
+  redraw();
+}).observe(pageBg);
 darkQuery.addEventListener('change', () => {
   refreshPage();
-  wake();
+  redraw();
 });
-motionQuery.addEventListener('change', wake);
+motionQuery.addEventListener('change', redraw);
 forcedColors.addEventListener('change', () => location.reload());
-document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && wake());
+document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && redraw());
 void document.fonts.ready.then(() => {
-  repaintLabel();
-  wake();
+  relayout();
+  track();
+  redraw();
 });
 
 if (import.meta.env.DEV) {
@@ -275,6 +362,7 @@ if (import.meta.env.DEV) {
     __goo: {
       params,
       looks,
+      tracker,
       wake,
       /** The 3D scene: __goo.scene.enter() / exit(), .scene (the model), .identity(), .shot(ms) (see scene/host.ts). */
       scene: sceneHost.dev,
@@ -340,8 +428,9 @@ if (import.meta.env.DEV) {
 /** The page-background region under the goo canvas, in page-canvas pixels. */
 function captureSource(): [number, number, number, number] {
   const r = gooCanvas.getBoundingClientRect();
-  const k = pageBg.width / window.innerWidth;
-  return [r.left * k, r.top * k, r.width * k, r.height * k];
+  const p = pageBox();
+  const k = pageBg.width / p.width;
+  return [(r.left - p.left) * k, (r.top - p.top) * k, r.width * k, r.height * k];
 }
 
 void start();

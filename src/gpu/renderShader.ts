@@ -243,7 +243,8 @@ const env = (dir: d.v3f, p: d.v2f, H: number, fw: number) => {
   const az = std.normalize(dir.xy.add(d.vec2f(1e-5, 0)));
   const cphi = std.dot(az, std.normalize(P.lightDir.xy));
   const lobe = 0.3 + 0.7 * std.max(cphi, 0) ** 2 + 0.385 * std.max(-cphi, 0) ** 2;
-  col = col.add(d.vec3f(std.exp(-((dir.z / 0.06) ** 2)) * P.horizonGain * lobe));
+  const hz = dir.z / 0.06;
+  col = col.add(d.vec3f(std.exp(-hz * hz) * P.horizonGain * lobe));
   col = col.add(softboxRadiance(dir, P.softboxes[0], fw));
   col = col.add(softboxRadiance(dir, P.softboxes[1], fw));
   col = col.add(softboxRadiance(dir, P.softboxes[2], fw));
@@ -288,12 +289,20 @@ const softMask = (s: number, sigma: number) => {
 };
 
 /** Macro thickness (rest + sim, no ridges) with one bilinear sim tap: (H, ∂H/∂x, ∂H/∂y, ∇²H). */
+/** Total putty height at grid resolution: answers "is there any goo here?" even while the dropped blob spreads. */
+const coverAt = (q: d.v2f) => {
+  'use gpu';
+  const P = L.$.params;
+  const size = d.vec2f(std.textureDimensions(L.$.cover, 0));
+  return std.textureSampleLevel(L.$.cover, L.$.smp, q.div(P.simCell).div(size), 0).x;
+};
+
 const macroAt = (q: d.v2f) => {
   'use gpu';
   const P = L.$.params;
   const size = d.vec2f(std.textureDimensions(L.$.sim, 0));
   const rest = restProfile(footprint(q), d.f32(0));
-  return rest.add(std.textureSampleLevel(L.$.sim, L.$.smp, q.div(P.simCell).div(size), 0));
+  return rest.add(std.textureSampleLevel(L.$.sim, L.$.smp, q.div(P.simCell).div(size), 0).mul(P.imprintGain));
 };
 
 /**
@@ -313,18 +322,19 @@ const groundLight = (q: d.v2f) => {
     const sSh = footprint(toLight).x;
     // Shadow and contact occlusion come from putty that is actually there (the dropped blob starts narrower
     // than its resting footprint).
-    const caster = std.smoothstep(0.3, 2.5, macroAt(toLight.sub(footprint(toLight).yz.mul(std.max(sSh, 0) + 4))).x);
-    const edge = std.smoothstep(0.3, 2.5, macroAt(q.sub(fp.yz.mul(std.max(s0, 0) + 2))).x);
+    const caster = std.smoothstep(0.3, 2.5, coverAt(toLight.sub(footprint(toLight).yz.mul(std.max(sSh, 0) + 4))));
+    const edge = std.smoothstep(0.3, 2.5, coverAt(q.sub(fp.yz.mul(std.max(s0, 0) + 2))));
     const under = softMask(s0 + 1, 1.5);
     const shadow = P.shadowOpacity * softMask(sSh, P.shadowSigma) * (1 - under) * caster;
     const ao = P.aoOpacity * std.exp(-std.max(s0, 0) / P.aoWidth) * std.smoothstep(-0.5, 0.5, s0) * edge;
     const sinT = std.length(P.lightDir.xy) / P.iorG;
     const tanT = sinT / std.sqrt(1 - sinT * sinT);
     const Hq = std.max(macroAt(q).x, 0);
-    const m = macroAt(q.add(lh.mul(Hq * tanT)));
+    const entry = q.add(lh.mul(Hq * tanT));
+    const m = macroAt(entry);
     const det = 1 + P.causticC * (std.dot(m.yz, m.yz) + std.max(m.x, 0) * m.w);
     const gain = std.clamp(1 / std.max(det, 0.2), P.causticMin, P.causticMax);
-    const caustic = std.mix(1, gain, std.saturate(m.x / 0.75));
+    const caustic = std.mix(1, gain, std.saturate(std.min(m.x, coverAt(entry)) / 0.75));
     gl = d.vec3f((1 - shadow) * (1 - ao) * caustic + P.causticAdd * std.max(caustic - 1, 0));
   }
   return gl;
@@ -377,14 +387,19 @@ const surfaceAt = (p: d.v2f) => {
   const sg = footprint(p);
   const rest = restProfile(sg, d.f32(0));
   const restS = restProfile(sg, 0.5 * P.pxCss);
-  const sim = sampleBSpline(L.$.sim, p.div(P.simCell));
-  const det = sampleBSpline(L.$.detail, p.div(P.detailTexel));
+  const sim = sampleBSpline(L.$.sim, p.div(P.simCell)).mul(P.imprintGain);
+  const detail = sampleBSpline(L.$.detail, p.div(P.detailTexel));
+  const det = d.vec4f(detail.xyz.mul(P.ridgeGain), detail.w * P.hazeGain);
   const Hm = rest.x + sim.x;
   // Ridges only exist where there is goo to carry them.
   const carry = std.smoothstep(0.2, 2, Hm);
   // Outside the rest footprint a bulge uses its own slope, not the extrapolated contact slope.
   const bulge = std.saturate(sim.x) * std.select(d.f32(0), d.f32(1), sg.x > 0);
-  const gS = std.mix(restS.yz, rest.yz, bulge).add(sim.yz).add(det.yz.mul(carry));
+  const spill = std.saturate(sim.x) * std.smoothstep(-3, 0.5 * P.pxCss, sg.x);
+  const gS = std.mix(restS.yz, rest.yz, bulge)
+    .mul(1 - spill)
+    .add(sim.yz)
+    .add(det.yz.mul(carry));
   // Coverage: the resting silhouette comes from the SDF (exact even for a vertical wall); material pushed past
   // it comes from the simulated height. While the dropped blob is still liquid and narrower than its footprint,
   // the total height at grid resolution decides where there is goo (the bicubic sim can't cancel the analytic
@@ -392,7 +407,9 @@ const surfaceAt = (p: d.v2f) => {
   const covRest = std.saturate(0.5 - sg.x / P.pxCss);
   const hc = sampleBSpline(L.$.cover, p.div(P.simCell)).x;
   const thin = std.mix(std.smoothstep(P.filmEps, P.filmEps + 0.8, hc), 1, std.smoothstep(0.6, 0.95, P.materialize));
-  const covBulge = std.saturate(0.5 + (sim.x - P.filmEps) / (std.clamp(std.length(sim.yz), 1, 8) * P.pxCss));
+  const covBulge =
+    std.saturate(0.5 + (sim.x - P.filmEps) / (std.clamp(std.length(sim.yz), 1, 8) * P.pxCss)) *
+    std.smoothstep(0, P.filmEps, sim.x);
   const cov = std.max(covRest * thin, covBulge * std.select(d.f32(0), d.f32(1), sg.x > -1));
   return Surface({
     n: std.normalize(d.vec3f(gS.mul(-1), 1)),
@@ -437,7 +454,7 @@ const shadeGoo = (
   // Edge glint: thin and light-facing, weaker on the far side (an internal-reflection cue).
   const cL = std.dot(std.normalize(sg.yz.add(d.vec2f(1e-6, 0))), std.normalize(P.lightDir.xy));
   const lobe = std.max(cL, 0) ** 2 + P.glintOpposite * std.max(-cL, 0) ** 2;
-  const glint = P.glint * lobe * std.exp(-std.max(-sg.x, 0) / P.glintWidth) * shine;
+  const glint = P.glint * lobe * std.exp(-std.abs(sg.x) / P.glintWidth) * shine;
   // Touch glow: the glass lights up from within under the finger.
   const gd = p.sub(P.glowCenter);
   const glow = P.glowAmount * std.exp(-std.dot(gd, gd) / (2 * P.glowRadius * P.glowRadius));
