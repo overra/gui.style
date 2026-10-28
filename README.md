@@ -12,8 +12,24 @@ npm install
 npm run dev
 ```
 
-Open the printed URL in a browser with WebGPU (recent Chrome, Edge or Safari). Add `?tune` to the URL for a live
-tuning panel. Without WebGPU, or under forced colors, you get a plain CSS glass button with the same semantics.
+Open the printed URL in a browser with WebGPU (recent Chrome, Edge or Safari). Without WebGPU, or under forced
+colors, you get a plain CSS glass button with the same semantics.
+
+## Tweaking the goo
+
+The **Tweak the goo** button (bottom right, or `?tune` in the URL) opens a live panel. Its four feel sliders run from
+0 to 1, and 0.5 is the default tuning:
+
+| Slider | 0 → 1 | What it drives |
+|---|---|---|
+| viscosity | thin and sloshy → thick and slow | flow damping and mobility, creep, how fast imprints heal, wobble damping, ridge leveling |
+| elasticity | doughy → bouncy | spring stiffness and wobble speed, how much of a dent springs back instantly versus sets, yield |
+| imprint | subtle → exaggerated | press depth, how long the imprint lingers, and a visual depth boost for the dent |
+| fingerprint | none → exaggerated | ridge prominence (shading gain), how long the print lasts, smudge haze |
+
+Presets (glass putty, jelly, honey, modeling clay, crime scene) set all four at once. The collapsed folders below
+them expose the base physics, fingerprint and glass values the sliders scale. Stability guards keep the explicit
+solver within its limits at any setting.
 
 ## Interaction
 

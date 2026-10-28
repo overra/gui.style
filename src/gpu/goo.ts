@@ -362,7 +362,7 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
       count++;
       if (pressing && f.downAt > newest) {
         newest = f.downAt;
-        const hold = now - f.downAt;
+        const hold = Math.max(0, now - f.downAt);
         glow.x = f.x;
         glow.y = f.y;
         glow.radius = f.ay * (0.6 + 1.0 * (1 - Math.exp(-hold / 0.25)));
@@ -492,13 +492,15 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
     });
 
     const det = eff.detail;
+    const fade = Math.exp(-dt / (reducedMotion ? det.fadeTau * 0.6 : det.fadeTau));
     detailUniform.write({
       texel: det.texel,
       period: det.period,
       depth: det.depth,
       stamp: 1 - Math.exp(-dt / det.stampTau),
-      fade: Math.exp(-dt / (reducedMotion ? det.fadeTau * 0.6 : det.fadeTau)),
-      smoothing: Math.min(0.03, det.smoothing * dt),
+      fade,
+      // Biharmonic leveling: |fade − 64·c| < 1 keeps even the finest (checkerboard) mode decaying, never flipping.
+      smoothing: Math.min(det.smoothing * dt, (0.95 * (1 + fade)) / 64),
       hazeFade: Math.exp(-dt / det.hazeTau),
       fingerCount,
       pxCss: 1 / scale,
@@ -531,7 +533,12 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
     encoder.submit();
   }
 
-  return { setLayout, setPage, setLabel, setViewport, replayDrop, snapToRest, surfaceAt, frame };
+  /** Compiles every pipeline up front (rejects if the device refuses one), instead of on the first frame. */
+  async function ready() {
+    await Promise.all([...Object.values(pipes), renderPipe].map((p) => p.initAsync()));
+  }
+
+  return { ready, setLayout, setPage, setLabel, setViewport, replayDrop, snapToRest, surfaceAt, frame };
 }
 
 export type Goo = ReturnType<typeof createGoo>;

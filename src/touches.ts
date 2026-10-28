@@ -134,7 +134,8 @@ export class FingerTracker {
     for (const f of this.fingers.values()) {
       if (this.pressing(f, now)) {
         f.surfaceZ = Math.max(surfaceAt(f.x, f.y), 4);
-        const hold = now - f.downAt;
+        // Frame and event clocks can disagree by a few ms; never let a press start in the future.
+        const hold = Math.max(0, now - f.downAt);
         const maxDepth = Math.max(0, f.surfaceZ - t.minFilm);
         const creep = 1 + t.creepFrac * (1 - Math.exp(-hold / t.creepTau));
         // Critically damped sink-in: starts gently, so the contact edge never outruns the goo's waves.
@@ -144,7 +145,7 @@ export class FingerTracker {
         const speed = Math.hypot(f.x - f.px, f.y - f.py) / Math.max(dt, 1e-3);
         f.speed += (speed - f.speed) * 0.35;
         const skim = 1 / Math.sqrt(1 + (f.speed / 400) ** 2);
-        f.depth = Math.min(maxDepth, f.surfaceZ * t.depthFrac * f.depthScale * creep) * ramp * skim;
+        f.depth = Math.min(maxDepth, f.surfaceZ * t.depthFrac * f.depthScale * creep * ramp * skim);
       } else {
         f.lift += t.liftSpeed * dt;
       }

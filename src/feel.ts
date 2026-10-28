@@ -31,11 +31,17 @@ export function effectiveParams(): Effective {
 
   // Viscosity: thicker putty damps its flow harder, flows less freely, creeps, heals and wobbles slower.
   const fluxDamping = plastic.fluxDamping * v;
-  let fluxGain = plastic.fluxGain * Math.min(1, 1 / v);
-  // Keep the explicit flux update stable whatever the sliders say:
-  // dt²·KP·8·(G + max(KM, KOUT) + 8σ) ≤ 2(1 + e^(−GP·dt)), with 10% margin and the intro's G = 2.
+  const decay = Math.exp(-fluxDamping * dt);
+  // Creep is an explicit diffusion too: keep dt·Mc·K well inside its own limit.
   const stiffness = 8 * (2 + Math.max(plastic.contact, plastic.dewet) + 8 * plastic.surfaceTension);
-  fluxGain = Math.min(fluxGain, (0.9 * 2 * (1 + Math.exp(-fluxDamping * dt))) / (dt * dt * stiffness));
+  const creep = Math.min(plastic.creep / v, 1.2 / (dt * stiffness));
+  // Keep the explicit flux update stable whatever the sliders say (checkerboard mode, intro's G = 2, 10% margin):
+  // dt²·KP·K + dt·Mc·K·(1 + d) ≤ 2(1 + d), d = e^(−GP·dt).
+  let fluxGain = plastic.fluxGain * Math.min(1, 1 / v);
+  fluxGain = Math.min(
+    fluxGain,
+    Math.max(0, (0.9 * 2 * (1 + decay) - dt * creep * stiffness * (1 + decay)) / (dt * dt * stiffness)),
+  );
 
   // Elasticity: a stiffer spring layer rings faster and takes more of the dent back instantly.
   let omega = elastic.omega * Math.sqrt(s);
@@ -54,7 +60,7 @@ export function effectiveParams(): Effective {
       ...plastic,
       fluxGain,
       fluxDamping,
-      creep: plastic.creep / v,
+      creep,
       // Doughy putty yields easily and keeps most of the dent; bouncy putty holds its shape and springs back.
       yieldHead: plastic.yieldHead * (0.5 + e),
       plasticShare: clamp(plastic.plasticShare - (e - 0.5) * 0.9 + (i - 0.5) * 0.3, 0.08, 0.95),

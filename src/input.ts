@@ -73,6 +73,8 @@ export function attachInput(hooks: InputHooks): () => void {
       (e) => {
         if (e.pointerType === 'mouse' && e.button !== 0) return;
         const kind = (e.pointerType === 'touch' || e.pointerType === 'pen' ? e.pointerType : 'mouse') as ContactKind;
+        // A new press on the button starts a new gesture: an earlier drag must not swallow its click.
+        if (kind === 'mouse') lastMouseDragAt = -1e9;
         let size = AXES[kind];
         if (kind === 'touch' && e.width > 2 && e.height > 2) {
           const a = clamp(0.62 * e.width, 16, 34);
@@ -118,6 +120,8 @@ export function attachInput(hooks: InputHooks): () => void {
     button.addEventListener(
       'click',
       () => {
+        // A held Enter key already presses the goo (and auto-repeat fires a click per repeat).
+        if (keyHeld.has(button)) return;
         const t = hooks.now();
         if (t - Math.max(tracker.lastPressAt, lastReleaseAt) > 0.35) virtualTap(button, t);
       },
