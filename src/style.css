@@ -1,0 +1,215 @@
+:root {
+  --ink: #16161a;
+  --ink-soft: rgba(22, 22, 26, 0.66);
+  --page: #f4f2ee;
+  --font: ui-rounded, 'SF Pro Rounded', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  /* Room around the button for bulges, fingers hanging off the edge and the shadow. */
+  --goo-m: 48px;
+  --goo-w: 248px;
+  --goo-h: 88px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #f2f3f7;
+    --ink-soft: rgba(242, 243, 247, 0.66);
+    --page: #0b0d12;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--page);
+  color: var(--ink);
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+
+body {
+  margin: 0;
+}
+
+#page-bg {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  height: 100lvh;
+  z-index: -1;
+  display: block;
+  pointer-events: none;
+}
+
+.stage {
+  min-height: 100vh;
+  min-height: 100svh;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  padding: max(24px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+    max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  overflow-x: clip;
+  text-align: center;
+}
+
+.intro {
+  max-width: 34rem;
+  margin-bottom: 8px;
+}
+
+.eyebrow {
+  margin: 0 0 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(2rem, 6vw, 3.25rem);
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  font-weight: 700;
+}
+
+.lede {
+  margin: 12px auto 0;
+  font-size: 1.02rem;
+  line-height: 1.5;
+  color: var(--ink-soft);
+  text-wrap: pretty;
+}
+
+.goo {
+  position: relative;
+  width: min(var(--goo-w), 100vw - 32px);
+  height: var(--goo-h);
+  margin-block: var(--goo-m);
+  isolation: isolate;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* The glass is drawn here; the canvas extends past the button by --goo-m on every side. */
+.goo-canvas {
+  position: absolute;
+  left: calc(-1 * var(--goo-m));
+  top: calc(-1 * var(--goo-m));
+  width: calc(100% + 2 * var(--goo-m));
+  height: calc(100% + 2 * var(--goo-m));
+  display: block;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+/* The real, accessible control. Until the GPU is live it is styled as plain CSS glass. */
+.goo-button {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: calc(var(--goo-h) / 2);
+  padding: 0;
+  font: 600 1.15rem/1 var(--font);
+  color: var(--ink);
+  background: color-mix(in srgb, var(--page) 45%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    inset 0 -8px 16px rgba(0, 0, 0, 0.06),
+    0 6px 20px rgba(0, 0, 0, 0.12);
+  backdrop-filter: blur(6px) saturate(160%);
+  -webkit-backdrop-filter: blur(6px) saturate(160%);
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.goo-button:active {
+  transform: scale(0.98);
+}
+
+.goo.is-live .goo-canvas {
+  opacity: 1;
+}
+
+/* Live: the goo canvas shows the button; its label is printed on the page under the glass. */
+.goo.is-live .goo-button {
+  color: transparent;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  touch-action: none;
+  transform: none;
+}
+
+/* Two tones so the ring holds 3:1 over any colour field. */
+.goo-button:focus {
+  outline: none;
+}
+
+.goo-button:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 4px;
+}
+
+.goo:has(.goo-button:focus-visible)::after {
+  content: '';
+  position: absolute;
+  inset: -9px;
+  z-index: 2;
+  border: 2px solid #0b0d12;
+  border-radius: calc(var(--goo-h) / 2 + 9px);
+  pointer-events: none;
+}
+
+.status {
+  margin: 0;
+  min-height: 1.5em;
+  font-size: 0.95rem;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.support {
+  max-width: 28rem;
+  margin: 12px 0 0;
+  font-size: 0.9rem;
+  line-height: 1.4;
+  color: var(--ink-soft);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .goo-canvas {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  #page-bg,
+  .goo-canvas {
+    display: none;
+  }
+
+  .goo-button,
+  .goo.is-live .goo-button {
+    color: ButtonText;
+    background: ButtonFace;
+    border: 2px solid ButtonText;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+}

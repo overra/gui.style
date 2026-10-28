@@ -1,0 +1,24 @@
+{
+  "name": "liquid-glass-goo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@typegpu/noise": "^0.12.1",
+    "@typegpu/sdf": "^0.12.2",
+    "lil-gui": "^0.21.0",
+    "typegpu": "^0.12.9"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.74",
+    "typescript": "^7.0.2",
+    "unplugin-typegpu": "^0.12.7",
+    "vite": "^8.3.5"
+  }
+}

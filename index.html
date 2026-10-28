@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Liquid Glass Goo</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <canvas id="page-bg" aria-hidden="true"></canvas>
+
+    <main class="stage">
+      <header class="intro">
+        <p class="eyebrow">TypeGPU · WebGPU</p>
+        <h1>Liquid Glass Goo</h1>
+        <p class="lede">A puddle of glassy putty resting on the page. Press it, hold it, drag through it. It keeps your fingerprint for a moment, then heals.</p>
+      </header>
+
+      <div class="goo">
+        <canvas class="goo-canvas" aria-hidden="true"></canvas>
+        <button class="goo-button" type="button" data-goo>Press me</button>
+      </div>
+
+      <p class="status" id="status" role="status"></p>
+      <p class="support" id="support" hidden></p>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
