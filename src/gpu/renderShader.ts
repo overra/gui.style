@@ -293,7 +293,7 @@ const macroAt = (q: d.v2f) => {
   const P = L.$.params;
   const size = d.vec2f(std.textureDimensions(L.$.sim, 0));
   const rest = restProfile(footprint(q), d.f32(0));
-  return rest.add(std.textureSampleLevel(L.$.sim, L.$.smp, q.div(P.simCell).div(size), 0));
+  return rest.add(std.textureSampleLevel(L.$.sim, L.$.smp, q.div(P.simCell).div(size), 0).mul(P.imprintGain));
 };
 
 /**
@@ -377,8 +377,9 @@ const surfaceAt = (p: d.v2f) => {
   const sg = footprint(p);
   const rest = restProfile(sg, d.f32(0));
   const restS = restProfile(sg, 0.5 * P.pxCss);
-  const sim = sampleBSpline(L.$.sim, p.div(P.simCell));
-  const det = sampleBSpline(L.$.detail, p.div(P.detailTexel));
+  const sim = sampleBSpline(L.$.sim, p.div(P.simCell)).mul(P.imprintGain);
+  const detail = sampleBSpline(L.$.detail, p.div(P.detailTexel));
+  const det = d.vec4f(detail.xyz.mul(P.ridgeGain), detail.w * P.hazeGain);
   const Hm = rest.x + sim.x;
   // Ridges only exist where there is goo to carry them.
   const carry = std.smoothstep(0.2, 2, Hm);

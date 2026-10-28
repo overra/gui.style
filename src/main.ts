@@ -1,5 +1,7 @@
+import type GUI from 'lil-gui';
 import { tgpu } from 'typegpu';
 import { paintLabel, paintPage, type Theme } from './background.ts';
+import { effectiveParams } from './feel.ts';
 import { createGoo, type Goo } from './gpu/goo.ts';
 import { attachInput } from './input.ts';
 import { measureLayout, type Layout } from './layout.ts';
@@ -130,12 +132,21 @@ const frame = (ms: number) => {
   const dt = lastFrame ? Math.min(now - lastFrame, 1 / 20) : 1 / 60;
   lastFrame = now;
 
+  const eff = effectiveParams();
+  tracker.setTuning(eff.finger);
   tracker.update(now, dt, goo.surfaceAt);
   if (tracker.busy) quietSince = now;
-  const sleeping = now - quietSince >= params.sleepAfter;
+  // Sleep only once every imprint, ridge and smudge has visibly healed under the current feel settings.
+  const settle = Math.max(
+    params.sleepAfter,
+    eff.heal.hold + eff.heal.ramp + 5 * eff.heal.tau,
+    5 * eff.detail.fadeTau,
+    5 * eff.detail.hazeTau,
+  );
+  const sleeping = now - quietSince >= settle;
   // Going to sleep: snap exactly back to the pristine shape and draw it once.
   if (sleeping) goo.snapToRest();
-  goo.frame({ now, dt, tracker, reducedMotion: motionQuery.matches, sinceIntro: now - droppedAt });
+  goo.frame({ now, dt, tracker, reducedMotion: motionQuery.matches, sinceIntro: now - droppedAt, eff });
   tracker.endFrame();
   afterFrame?.();
   afterFrame = null;
@@ -181,7 +192,10 @@ async function start() {
   }
   wake();
   // Reveal the glass only once its first frame has landed (the CSS button stays until then).
-  void device.queue.onSubmittedWorkDone().then(() => gooWrap.classList.add('is-live'));
+  void device.queue.onSubmittedWorkDone().then(() => {
+    gooWrap.classList.add('is-live');
+    if (tweak) tweak.hidden = false;
+  });
 
   void device.lost.then((info) => {
     gooWrap.classList.remove('is-live');
@@ -200,12 +214,21 @@ function dropAgain() {
   wake();
 }
 
-// ?tune opens a live tuning panel (loaded on demand, so it costs nothing otherwise).
-if (new URLSearchParams(location.search).has('tune')) {
-  void import('./tuning.ts').then(({ openTuning }) =>
-    openTuning({ theme, wake, replayDrop: dropAgain, tap: () => buttons[0]?.click() }),
-  );
+// The tuning panel loads on demand (the "Tweak the goo" button, or ?tune in the URL).
+const tweak = document.getElementById('tweak') as HTMLButtonElement | null;
+let gui: GUI | null = null;
+let guiOpen = false;
+async function toggleTuning(open = !guiOpen) {
+  if (!gui) {
+    const { openTuning } = await import('./tuning.ts');
+    gui = openTuning({ theme, wake, replayDrop: dropAgain, tap: () => buttons[0]?.click() });
+  }
+  guiOpen = open;
+  gui.show(open);
+  tweak?.setAttribute('aria-expanded', String(open));
 }
+tweak?.addEventListener('click', () => void toggleTuning());
+if (new URLSearchParams(location.search).has('tune')) void toggleTuning(true);
 
 new ResizeObserver(() => relayout()).observe(gooCanvas);
 window.addEventListener('resize', () => {

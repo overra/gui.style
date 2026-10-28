@@ -54,6 +54,10 @@ export class FingerTracker {
 
   constructor(private tuning: FingerTuning) {}
 
+  setTuning(tuning: FingerTuning): void {
+    this.tuning = tuning;
+  }
+
   get busy(): boolean {
     return this.fingers.size > 0;
   }

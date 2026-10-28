@@ -2,6 +2,18 @@
 // (one cell = `sim.cell` CSS px) because the stencils are written per cell.
 
 export const params = {
+  /**
+   * Feel macros, 0..1 with 0.5 = the tuned values below (see feel.ts for what each one drives):
+   * viscosity (thin, sloshy → thick, slow), elasticity (doughy → bouncy), imprint (subtle → exaggerated dent),
+   * fingerprint (no ridges → exaggerated ridges).
+   */
+  feel: {
+    viscosity: 0.5,
+    elasticity: 0.5,
+    imprint: 0.5,
+    fingerprint: 0.5,
+  },
+
   shape: {
     /** Plateau thickness of the resting putty and the width of its rounded wall. */
     plateau: 18,

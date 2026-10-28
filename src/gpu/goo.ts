@@ -3,6 +3,7 @@
 
 import { common, d, type TgpuRoot } from 'typegpu';
 import type { Theme } from '../background.ts';
+import type { Effective } from '../feel.ts';
 import { sceneSdf, sameGrid, type GooShape, type Layout } from '../layout.ts';
 import { looks } from '../look.ts';
 import { params, restHeightCpu } from '../params.ts';
@@ -31,6 +32,8 @@ export interface FrameInput {
   reducedMotion: boolean;
   /** Seconds since the goo was dropped onto the page (large when there's no intro). */
   sinceIntro: number;
+  /** Physical and visual knobs after the feel macros (feel.ts). */
+  eff: Effective;
 }
 
 type FingerData = d.InferInput<typeof Finger>;
@@ -373,7 +376,7 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
     return count;
   }
 
-  function writeGlass(setF: number) {
+  function writeGlass(setF: number, visual: Effective['visual']) {
     if (!layout) return;
     const look = looks[theme];
     const s0 = layout.shapes[0];
@@ -427,6 +430,9 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
       glowCenter: d.vec2f(glow.x, glow.y),
       glowRadius: glow.radius,
       materialize: setF,
+      imprintGain: visual.imprintGain,
+      ridgeGain: visual.ridgeGain,
+      hazeGain: visual.hazeGain,
       softboxes: look.softboxes.map((b) => ({
         c: d.vec3f(...b.c),
         t: d.vec3f(...b.t),
@@ -439,19 +445,19 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
     });
   }
 
-  function frame({ dt, tracker, reducedMotion, sinceIntro, now }: FrameInput) {
+  function frame({ dt, tracker, reducedMotion, sinceIntro, now, eff }: FrameInput) {
     if (!sim || !bound || !renderGroup || !layout) return;
     const { substep, maxSubsteps } = params.sim;
 
     // Intro: the dropped blob slumps as a liquid, then sets into putty (thixotropic build-up).
     const intro = params.intro;
     const setF = sinceIntro < intro.liquidFor ? 0 : 1 - Math.exp(-(sinceIntro - intro.liquidFor) / intro.setTau);
-    const pl = params.plastic;
-    const el = params.elastic;
-    const fluxDamping = intro.liquidDamping + (pl.fluxDamping - intro.liquidDamping) * setF;
+    const pl = eff.plastic;
+    const el = eff.elastic;
+    const fluxDamping = eff.introDamping + (pl.fluxDamping - eff.introDamping) * setF;
     // Reduced motion: critically damped elastic layer (no wobble) and quicker healing.
     const zeta = reducedMotion ? 1 : el.zeta;
-    const heal = params.heal;
+    const heal = eff.heal;
 
     accumulator += dt;
     const steps = Math.min(maxSubsteps, Math.floor(accumulator / substep));
@@ -485,7 +491,7 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
       pad2: 0,
     });
 
-    const det = params.detail;
+    const det = eff.detail;
     detailUniform.write({
       texel: det.texel,
       period: det.period,
@@ -497,7 +503,7 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
       fingerCount,
       pxCss: 1 / scale,
     });
-    writeGlass(setF);
+    writeGlass(setF, eff.visual);
 
     const encoder = root['~unstable'].createCommandEncoder();
     const pass = encoder.beginComputePass();
