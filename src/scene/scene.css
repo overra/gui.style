@@ -1,0 +1,171 @@
+/* Config mode (the 3D scene view). Everything here is inert until the view is opened. */
+
+.scene-toggle {
+  position: fixed;
+  right: max(16px, env(safe-area-inset-right));
+  bottom: max(16px, env(safe-area-inset-bottom));
+  z-index: 30;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid color-mix(in srgb, var(--ink) 18%, transparent);
+  border-radius: 18px;
+  font: 600 0.85rem/1 var(--font);
+  color: var(--ink);
+  background: color-mix(in srgb, var(--page) 70%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  cursor: pointer;
+}
+
+.scene-toggle[aria-pressed='true'] {
+  color: #fff;
+  background: rgba(12, 14, 18, 0.72);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.scene-toggle:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px #0b0d12;
+}
+
+/* The full-viewport WebGPU canvas; it fades in over the flat page, which then hides underneath it. */
+.scene-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: -1;
+  display: block;
+  opacity: 0;
+  pointer-events: none;
+  touch-action: none;
+  transition: opacity 0.16s;
+}
+
+html.scene-on .scene-canvas {
+  opacity: 1;
+  pointer-events: auto;
+  cursor: grab;
+}
+
+html.scene-on .scene-canvas.is-dragging {
+  cursor: grabbing;
+}
+
+html.scene-on .scene-canvas.is-handle {
+  cursor: move;
+}
+
+html.scene-on .scene-canvas.is-goo {
+  cursor: pointer;
+}
+
+/* The 2D goo cross-fades out (its own 0.2 s transition) while the 3D goo, drawn in the same place, shows through. */
+html.scene-on .goo.is-live .goo-canvas {
+  opacity: 0;
+}
+
+html.scene-full #page-bg {
+  visibility: hidden;
+}
+
+/* The page UI follows the orbit camera (CSS 3D fallback) and leaves input to the scene canvas. */
+html.scene-on .stage {
+  pointer-events: none;
+  transform-origin: 0 0;
+}
+
+html.scene-on,
+html.scene-on body {
+  overflow: hidden;
+}
+
+/* html-in-canvas: the UI is laid out inside this canvas and drawn into the 3D scene. */
+.scene-ui-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: -1;
+  display: block;
+  pointer-events: none;
+}
+
+/* Opacity follows the view's tilt away from the camera (set per frame). */
+.scene-labels {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+  opacity: 0;
+}
+
+.scene-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  padding: 3px 7px;
+  border-radius: 6px;
+  font: 600 11px/1.2 var(--font);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  color: #fff;
+  background: rgba(12, 14, 18, 0.66);
+  will-change: transform;
+}
+
+.scene-label[data-kind='camera'] {
+  color: #1a1400;
+  background: rgba(255, 199, 46, 0.92);
+}
+
+.scene-label[data-kind='page'] {
+  color: #001626;
+  background: rgba(120, 200, 255, 0.92);
+}
+
+.scene-label[data-selected] {
+  outline: 2px solid #fff;
+}
+
+.scene-panel {
+  position: fixed;
+  left: max(12px, env(safe-area-inset-left));
+  top: max(12px, env(safe-area-inset-top));
+  z-index: 30;
+  max-height: calc(100vh - 24px);
+  overflow: auto;
+}
+
+.scene-panel .lil-gui.root {
+  --width: 290px;
+}
+
+.scene-hint {
+  position: fixed;
+  left: 50%;
+  bottom: max(16px, env(safe-area-inset-bottom));
+  z-index: 25;
+  translate: -50% 0;
+  max-width: calc(100vw - 180px);
+  padding: 8px 12px;
+  border-radius: 10px;
+  font: 500 12px/1.35 var(--font);
+  text-align: center;
+  color: #fff;
+  background: rgba(12, 14, 18, 0.66);
+  pointer-events: none;
+}
+
+@media (max-width: 600px) {
+  .scene-hint {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scene-canvas {
+    transition: none;
+  }
+}

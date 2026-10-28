@@ -492,3 +492,20 @@ export const gooFragment = tgpu.fragmentFn({
   const rgb = enc.mul(S.cov).add(d.vec3f(outW * (1 - S.cov)));
   return d.vec4f(std.min(rgb, d.vec3f(a)), a);
 });
+
+// Shared with the 3D scene view (sceneShaders.ts), which shades the same glass along arbitrary view rays.
+export {
+  ditherTPDF,
+  env,
+  footprint,
+  fresnelSchlick,
+  ggxSpecular,
+  groundLight,
+  highlightShoulder,
+  linearToSrgb,
+  LUMA,
+  pageOnly,
+  pageTap,
+  restProfile,
+  surfaceAt,
+};

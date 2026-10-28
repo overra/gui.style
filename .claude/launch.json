@@ -13,6 +13,17 @@
       "port": 5179
     },
     {
+      "name": "goo-3d",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "vite",
+        "--port",
+        "5181",
+        "--strictPort"
+      ],
+      "port": 5181
+    },
+    {
       "name": "goo-preview",
       "runtimeExecutable": "npx",
       "runtimeArgs": [

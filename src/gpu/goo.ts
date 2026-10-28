@@ -34,6 +34,7 @@ export interface FrameInput {
 }
 
 type FingerData = d.InferInput<typeof Finger>;
+export type GlassInput = d.InferInput<typeof GlassParams>;
 
 const WG = 8;
 
@@ -130,6 +131,10 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
   let accumulator = 0;
   let detailFlip = 0;
   let restField = new Float32Array(0);
+  // Scene hooks (src/scene): the scene's lights and camera rewrite the glass uniforms; the 3D view shares textures.
+  let glassHook: ((values: GlassInput, theme: Theme) => GlassInput) | null = null;
+  let lastGlass: GlassInput | null = null;
+  let resourceVersion = 0;
   const glow = { x: 0, y: 0, amount: 0, radius: 20 };
 
   const bindSim = (t: SimTextures) => {
@@ -244,6 +249,7 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
         for (const t of [...sim.detail, sim.detailPack]) t.destroy();
       }
       sim = makeSimTextures(next);
+      resourceVersion++;
       const init = initialState(next, drop);
       restField = init.rest;
       sim.rest.write(init.rest);
@@ -265,6 +271,7 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
     if (!page || page.props.size[0] !== pageCanvas.width || page.props.size[1] !== pageCanvas.height) {
       page?.destroy();
       page = tex.page(pageCanvas.width, pageCanvas.height);
+      resourceVersion++;
     }
     page.write(pageCanvas);
     page.generateMipmaps();
@@ -276,6 +283,7 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
     if (!label || label.props.size[0] !== labelCanvas.width || label.props.size[1] !== labelCanvas.height) {
       label?.destroy();
       label = tex.mask(labelCanvas.width, labelCanvas.height);
+      resourceVersion++;
     }
     label.write(labelCanvas);
     label.generateMipmaps();
@@ -377,7 +385,7 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
     if (!layout) return;
     const look = looks[theme];
     const s0 = layout.shapes[0];
-    glassUniform.write({
+    const values: GlassInput = {
       canvasOrigin: d.vec2f(layout.canvasX, layout.canvasY),
       viewport: d.vec2f(layout.viewportW, layout.viewportH),
       pxCss: 1 / scale,
@@ -436,7 +444,9 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
         round: b.round,
         soft: b.soft,
       })),
-    });
+    };
+    lastGlass = values;
+    glassUniform.write(glassHook ? glassHook(values, theme) : values);
   }
 
   function frame({ dt, tracker, reducedMotion, sinceIntro, now }: FrameInput) {
@@ -525,7 +535,31 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
     encoder.submit();
   }
 
-  return { setLayout, setPage, setLabel, setViewport, replayDrop, snapToRest, surfaceAt, frame };
+  /** Lets the scene rewrite the glass uniforms (null restores look.ts as is). */
+  function setGlassHook(hook: typeof glassHook) {
+    glassHook = hook;
+  }
+
+  /** What the 3D scene view shares with us: the same textures and per-frame glass values (before the hook). */
+  function sceneResources() {
+    if (!sim || !page || !label || !layout || !lastGlass) return null;
+    return {
+      version: resourceVersion,
+      page,
+      label,
+      simPack: sim.simPack,
+      cover: sim.cover,
+      detailPack: sim.detailPack,
+      shapes: shapeUniform,
+      labelParams: labelUniform,
+      sampler: smp,
+      glass: lastGlass,
+      layout,
+      theme,
+    };
+  }
+
+  return { setLayout, setPage, setLabel, setViewport, replayDrop, snapToRest, surfaceAt, frame, setGlassHook, sceneResources };
 }
 
 export type Goo = ReturnType<typeof createGoo>;

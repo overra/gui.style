@@ -5,6 +5,7 @@ import { attachInput } from './input.ts';
 import { measureLayout, type Layout } from './layout.ts';
 import { looks } from './look.ts';
 import { params } from './params.ts';
+import { createSceneHost } from './scene/host.ts';
 import { FingerTracker } from './touches.ts';
 
 const MAX_DPR = 2;
@@ -86,7 +87,8 @@ function repaintLabel() {
 }
 
 function relayout() {
-  if (!goo) return;
+  // The 3D view transforms or re-parents the page UI, so DOM boxes are not page boxes until it hands back.
+  if (!goo || sceneHost.holdsLayout) return;
   const rect = gooCanvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   const budget = matchMedia('(pointer: coarse)').matches ? params.pixelBudget.coarse : params.pixelBudget.fine;
@@ -112,7 +114,7 @@ function refreshPage() {
 }
 
 function track() {
-  if (!goo || !layout) return;
+  if (!goo || !layout || sceneHost.holdsLayout) return;
   const r = gooCanvas.getBoundingClientRect();
   goo.setViewport(r.left, r.top, window.innerWidth, window.innerHeight);
   layout = { ...layout, canvasX: r.left, canvasY: r.top, viewportW: window.innerWidth, viewportH: window.innerHeight };
@@ -131,11 +133,12 @@ const frame = (ms: number) => {
   lastFrame = now;
 
   tracker.update(now, dt, goo.surfaceAt);
-  if (tracker.busy) quietSince = now;
+  if (tracker.busy || sceneHost.busy) quietSince = now;
   const sleeping = now - quietSince >= params.sleepAfter;
   // Going to sleep: snap exactly back to the pristine shape and draw it once.
   if (sleeping) goo.snapToRest();
   goo.frame({ now, dt, tracker, reducedMotion: motionQuery.matches, sinceIntro: now - droppedAt });
+  sceneHost.frame(now);
   tracker.endFrame();
   afterFrame?.();
   afterFrame = null;
@@ -162,6 +165,21 @@ attachInput({
   wake,
 });
 
+// ---- the scene behind the page: lights and camera for the glass, and the 3D config view (press C) ----
+const sceneHost = createSceneHost({
+  pageBg,
+  stage: document.querySelector('.stage') as HTMLElement,
+  tracker,
+  theme,
+  clock,
+  wake: () => wake(),
+  layout: () => layout,
+  resync: () => {
+    relayout();
+    track();
+  },
+});
+
 // ---- bring-up, with recovery from device loss ----
 let losses: number[] = [];
 
@@ -172,6 +190,7 @@ async function start() {
   const root = tgpu.initFromDevice({ device });
   try {
     goo = createGoo(root, gooCanvas);
+    sceneHost.attach(goo, root);
     refreshPage();
     relayout();
   } catch (err) {
@@ -186,6 +205,7 @@ async function start() {
   void device.lost.then((info) => {
     gooWrap.classList.remove('is-live');
     goo = null;
+    sceneHost.detach();
     if (info.reason === 'destroyed') return;
     const t = clock();
     losses = losses.filter((x) => t - x < 60).concat(t);
@@ -256,6 +276,8 @@ if (import.meta.env.DEV) {
       params,
       looks,
       wake,
+      /** The 3D scene: __goo.scene.enter() / exit(), .scene (the model), .identity(), .shot(ms) (see scene/host.ts). */
+      scene: sceneHost.dev,
       drive(ms: number) {
         if (virtualNow === null) {
           cancelAnimationFrame(rafId);
