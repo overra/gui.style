@@ -15,8 +15,20 @@ Config mode detaches the view from the camera. The view flies to a 3/4 orbit and
 You can orbit, move lights, push the page back and press the goo from any angle. Leaving the mode flies back
 into the camera and cross-fades to the flat page.
 
-**Try it:** `npm run dev`, then press **C**, or use the "3D scene" button. The button shows in dev, or with `?scene`
-or `?tune`. **Esc** or **C** returns to the page.
+**Try it:** `npm run dev`, then press **C**, or use the "3D scene" button at the bottom left. The button shows in
+dev, or with `?scene` or `?tune`. **Esc** or **C** returns to the page.
+
+**Direction (from the user, 2026-10-28).**
+
+- UI elements can live anywhere in 3D space, not only on the reference plane.
+- A next experiment: a liquid glass button that levitates some distance in front of the backdrop. Pressing it would
+  displace the whole button in 3D, as well as squishing it.
+- This 3D config interface is going to become a bigger part of the project.
+
+The groundwork is already in place for the levitating button. The glass is ray-traced in 3D with a real air gap
+under it (refraction, displaced shadow), so a button raised off the page is the "page depth" case seen from the
+other side. What it still needs is a goo object with its own transform (position and depth), rather than goo fixed
+to the reference plane. See next step 6.
 
 In config mode:
 
@@ -118,12 +130,16 @@ There are two modes:
 - **Fill** (default): the plane is scaled by `s = (D + g)/D`. Its corners then lie exactly on the frustum's edges
   (the config view draws the extension lines to show it), and from the camera it looks unchanged. A page point
   (u, v) in page CSS px sits at world `((u − W/2)·s, (v − H/2)·s, −g)`.
-- **Fixed size**: s = 1. The camera sees the plane shrunk by `k = D/(D + g)` about the viewport center, and normal
-  mode applies exactly that `scale(k)` to `#page-bg`.
+- **Fixed size**: s = 1. The camera sees the plane shrunk by `k = D/(D + g)` about the viewport center. Only the
+  config view draws it that way. Normal mode keeps the page filling the view (with the same depth terms), because
+  `main` maps the glass through `#page-bg`'s own box, and scaling that box would move what it measures.
 
-  The glass's screen → page lookup `uv = (canvasOrigin + q) / viewport` is remapped with
-  `viewport' = k·V` and `canvasOrigin' = canvasOrigin − (V/2)(1 − k)`. With those, the reflection eye
-  `V/2 − canvasOrigin` comes out unchanged.
+  To show it in normal mode, an overlay canvas could draw the page art scaled by k. The glass would then remap its
+  screen → page lookup with `viewport' = k·V` and `canvasOrigin' = canvasOrigin − (V/2)(1 − k)`, which leaves the
+  reflection eye `V/2 − canvasOrigin` unchanged.
+
+"Viewport" here means the page canvas box (`Layout.viewportW/H`), which is the window when the page doesn't
+scroll. The 3D view assumes the two coincide.
 
 **Through the glass to a pushed-back page.** The config view traces it exactly:
 
@@ -309,6 +325,10 @@ __goo.scene.config().dev.setPose({ polar: 60, azimuth: 30 }) // also flyTo, focu
   traces it exactly.
 - **The camera is locked frontal.** Only its distance (FOV) is editable. An off-axis camera would mean drawing
   normal mode through the 3D path.
+- **Fixed-size page is 3D only.** An unscaled ("fixed") page pushed back is only drawn smaller in the config view.
+  Normal mode shows it filling the view.
+- **The page must fit the window.** The 3D view assumes the page canvas box is the window (no scrolled page, no
+  mobile toolbar offset).
 - **No live layout in config mode.** Layout measurement is held while the 3D view owns the page UI. A window
   resize applies on exit.
 - **CSS 3D fallback has no depth sorting.** It draws the DOM above the WebGPU canvas, so gizmos and the goo can't
@@ -329,15 +349,24 @@ __goo.scene.config().dev.setPose({ polar: 60, azimuth: 30 }) // also flyTo, focu
 2. **Positional lighting in the glass.** Per-pixel light directions, point and spot lights, and any number of
    lights through a storage buffer. Shadows from more than the key light.
 3. **html-in-canvas for real (Chrome 157+).** Permanent drawable `.stage`, the glass refracting live UI, the label
-   from the real button, hit testing via `updateElementGeometry`. Decide whether UI belongs on the reference plane
-   (as here) or on the page plane.
+   from the real button, hit testing via `updateElementGeometry`. Per the user, UI elements are free to sit
+   anywhere in 3D: each drawable element becomes its own textured quad with a transform.
 4. **One renderer for both modes?** Render normal mode through the 3D path when the scene departs from the flat
    defaults: lit paper, an off-axis camera, a deep page. That would trade the small goo canvas for a full-viewport
    pass.
 5. **Gizmo UX.** Axis constraints, snapping, numeric overlays, undo, and a two-finger pan.
+6. **A levitating glass button.** Give the goo object a transform: a height above the page and, later, any pose.
+   - **Render.** The 3D view needs only an offset for the height-field box plus the air gap below it. Refraction
+     and shadow already trace a gap. Normal mode can fold the hover height into the same depth terms as a
+     pushed-back page.
+   - **Press.** A press would drive the button's rigid-body motion too: a damped spring on its height (and maybe
+     tilt) that a finger pushes toward the page. The squish (the existing height field) would ride on top.
+   - **Input.** The press point must be found by ray, as config mode already does, because the button's screen
+     position no longer matches its DOM box.
 
-Open questions for you:
+Open questions:
 
-- Should UI elements live on the reference plane (they stay put while the page recedes) or on the page plane?
+- **Answered:** UI elements can live anywhere in 3D space.
 - Should the light rig follow the goo, as now, or be world-anchored, so lights stay put when the button moves?
-- Is the config view a dev and design tool only, or should users ever see it?
+- Is the config view a dev and design tool only, or should users ever see it? (It is becoming a bigger part of the
+  project.)
