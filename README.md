@@ -1,6 +1,10 @@
-# Liquid Glass Goo
+# gui.style
 
-A WebGPU button made of glassy putty, built with [TypeGPU](https://typegpu.com) and `@typegpu/sdf`.
+Experiments in interface elements as physical objects: real materials, lit by the scene they live in, placed in 3D
+space.
+
+The first one is **Liquid Glass Goo**, a WebGPU button made of glassy putty, built with [TypeGPU](https://typegpu.com)
+and `@typegpu/sdf`.
 
 The putty rests on the page; gravity points into the screen, so the page is the ground it sits on. Press it and a
 fingertip dent sinks in, pushing material into a raised rim and printing your fingerprint into the surface. Let go
@@ -44,6 +48,19 @@ button down and tilts it toward the finger, and it springs back. See `docs/3d-co
   activations get a press too.
 - It is a real `<button>`: clicks, focus, keyboard and accessible name are native. Dragging the mouse through the
   goo counts as play, not a click.
+
+## The 3D view
+
+Press **C** (or the **3D scene** button, shown in dev and with `?scene` or `?tune`) to step out of the page. The view
+flies to a 3/4 view of the scene: the camera and its frustum, the page as a plane behind the screen, the light rig,
+two probe balls and the goo.
+
+- Drag to orbit, right- or shift-drag to pan, scroll or pinch to zoom.
+- Drag a light or the page's blue depth handle, or press the goo from any angle.
+- F, O and V fly to the goo, an overview and the camera. Esc or C goes back.
+
+With html-in-canvas (Chrome 157 and later) the page UI is drawn into the scene as a texture; elsewhere a CSS 3D
+transform carries the live DOM along. Design notes are in `docs/3d-config-view.md`.
 
 ## How it works
 
@@ -101,6 +118,10 @@ to the exact resting state, so an idle page costs nothing.
 | `src/gpu/detailKernels.ts` | Fingerprint layer |
 | `src/gpu/renderShader.ts` | Liquid-glass shading |
 | `src/levitation.ts` | The floating button's rigid-body motion (air-cushion spring) |
+| `src/scene/scene.ts`, `src/scene/math.ts` | Scene model (camera, page plane, lights, the goo's frame); vector helpers |
+| `src/scene/host.ts` | Feeds the scene to the glass in normal mode; loads the 3D view on demand |
+| `src/scene/configMode.ts`, `src/scene/htmlInCanvas.ts` | The 3D view: orbit camera, gizmos, panel, picking; page UI via html-in-canvas |
+| `src/gpu/sceneView.ts`, `src/gpu/sceneShaders.ts` | Ray-traces the 3D view |
 | `src/tuning.ts` | `?tune` panel (lil-gui, loaded on demand) |
 
 ## Dev harness
