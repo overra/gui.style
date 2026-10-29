@@ -85,7 +85,7 @@ type Drag =
   | { kind: 'orbit' | 'pan'; x0: number; y0: number; pose0: OrbitPose }
   | { kind: 'light'; index: number; planePoint: Vec3; offset: Vec3 }
   | { kind: 'depth'; y0: number; depth0: number; perPx: number }
-  | { kind: 'press'; id: number; z: number };
+  | { kind: 'press'; id: number; z: number; x: number; y: number };
 
 const ENTER_S = 1.15;
 const EXIT_S = 0.9;
@@ -657,6 +657,13 @@ export function createConfigMode(deps: ConfigDeps) {
     return { o: toGooFrame(frame, r.o), v: gooFrameDir(frame, r.d) };
   }
 
+  /** Where the pointer's ray crosses height `h` above the goo's base, in goo space (or null if it never does). */
+  function gooPlanePoint(cam: CameraBasis, x: number, y: number, layout: Layout, h: number): [number, number] | null {
+    const { o, v } = gooRay(cam, x, y, layout);
+    const t = Math.abs(v[2]) > 1e-9 ? (h - o[2]) / v[2] : -1;
+    return t > 0 ? [o[0] + v[0] * t, o[1] + v[1] * t] : null;
+  }
+
   /** Where the pointer's ray first meets the resting putty: goo space and height above its base, or null. */
   function gooHit(cam: CameraBasis, x: number, y: number) {
     const layout = deps.layout();
@@ -784,7 +791,7 @@ export function createConfigMode(deps: ConfigDeps) {
           surfaceZ: Math.max(goo.surfaceAt(hit.x, hit.y), 4),
           now: deps.clock(),
         });
-        if (id >= 0) drag = { kind: 'press', id, z: hit.z };
+        if (id >= 0) drag = { kind: 'press', id, z: hit.z, x, y };
       }
     }
     drag ??= { kind: e.button !== 0 || e.shiftKey ? 'pan' : 'orbit', x0: x, y0: y, pose0: copyPose(pose) };
@@ -838,13 +845,18 @@ export function createConfigMode(deps: ConfigDeps) {
         deps.sceneChanged();
         break;
       case 'press': {
-        // The finger slides across the putty at the height it pressed in, in the goo's frame as it is now.
+        // The finger slides across the putty by the pointer's movement, measured at the height it pressed in and in
+        // the goo's frame as it is now. A still pointer leaves the finger where it is while the cushion sinks and
+        // tilts the button under it; re-casting the absolute ray would snap it across the putty instead.
         const layout = deps.layout();
-        if (layout) {
-          const { o, v } = gooRay(cam, x, y, layout);
-          const t = Math.abs(v[2]) > 1e-9 ? (drag.z - o[2]) / v[2] : -1;
-          if (t > 0) deps.tracker.move(drag.id, o[0] + v[0] * t, o[1] + v[1] * t);
+        const f = deps.tracker.fingers.get(drag.id);
+        if (layout && f) {
+          const a = gooPlanePoint(cam, drag.x, drag.y, layout, drag.z);
+          const b = gooPlanePoint(cam, x, y, layout, drag.z);
+          if (a && b) deps.tracker.move(drag.id, f.x + b[0] - a[0], f.y + b[1] - a[1]);
         }
+        drag.x = x;
+        drag.y = y;
         break;
       }
     }

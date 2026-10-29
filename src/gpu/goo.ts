@@ -244,6 +244,13 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
 
   function setLayout(next: Layout, nextScale: number, drop: boolean) {
     scale = nextScale;
+    // The canvas can grow or shrink around the button (a floating button's shadow): the touch glow stays on it.
+    const a = layout?.shapes[0];
+    const b = next.shapes[0];
+    if (a && b) {
+      glow.x += b.cx - a.cx;
+      glow.y += b.cy - a.cy;
+    }
     if (!sameGrid(layout, next) || !sim) {
       if (sim) {
         for (const t of [sim.rest, sim.stateA, sim.stateB, sim.pressure, sim.flux, sim.faces, sim.limit, sim.simPack, sim.cover]) {

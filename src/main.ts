@@ -1,4 +1,3 @@
-import type GUI from 'lil-gui';
 import { tgpu } from 'typegpu';
 import { paintLabel, paintPage, type Theme } from './background.ts';
 import { effectiveParams } from './feel.ts';
@@ -10,6 +9,7 @@ import { looks } from './look.ts';
 import { params } from './params.ts';
 import { createSceneHost } from './scene/host.ts';
 import { FingerTracker } from './touches.ts';
+import type { Tuning } from './tuning.ts';
 
 const MAX_DPR = 2;
 /** How far the goo canvas may reach past the button for a floating button's shadow (CSS px). */
@@ -115,11 +115,16 @@ function relayout() {
     gooCanvas.width = w;
     gooCanvas.height = h;
   }
+  const before = layout?.shapes[0];
   layout = measureLayout(gooCanvas, buttons, params.sim.cell, pageBox());
-  // Drop the goo onto the page the first time it appears (unless motion is reduced).
+  // Goo space starts at the canvas' corner. When the canvas grows or shrinks around the button (a floating button's
+  // shadow), held fingers move with the button, so they stay where they pressed.
+  const after = layout.shapes[0];
+  if (before && after) tracker.shift(after.cx - before.cx, after.cy - before.cy);
+  // Drop the goo onto the page the first time it appears (unless motion is reduced). start() settles the canvas size
+  // before it marks the goo dropped, so the drop lands on the final grid.
   const drop = !dropped && !motionQuery.matches;
   if (drop) droppedAt = clock();
-  dropped = true;
   goo.setLayout(layout, gooScale, drop);
   repaintLabel();
 }
@@ -140,15 +145,17 @@ function track() {
 
 // A floating button's shadow lands further out than --goo-m: the goo canvas grows to fit it (in 16 px steps, so a
 // hover slider doesn't re-lay out the goo on every tick; resizing it rebuilds the simulation grid at rest).
+// Returns true when the size changed; the caller re-lays out before drawing.
 const gooMargin = parseFloat(getComputedStyle(gooWrap).getPropertyValue('--goo-m')) || 48;
 let bleed = gooMargin;
-function syncBleed() {
-  if (sceneHost.holdsLayout) return;
+function syncBleed(): boolean {
+  if (sceneHost.holdsLayout) return false;
   const want = Math.min(Math.max(Math.ceil(sceneHost.shadowReach() / 16) * 16, gooMargin), MAX_BLEED);
-  if (want === bleed) return;
+  if (want === bleed) return false;
   bleed = want;
   if (want === gooMargin) gooWrap.style.removeProperty('--goo-bleed');
   else gooWrap.style.setProperty('--goo-bleed', `${want}px`);
+  return true;
 }
 
 // ---- frame loop: runs while anything moves, sleeps once the goo has healed ----
@@ -159,6 +166,11 @@ let quietSince = clock();
 const frame = (ms: number) => {
   rafId = 0;
   if (!goo || !layout) return;
+  // Resize for the shadow before drawing: a resize after drawing would throw this frame away (the button blinks out).
+  if (syncBleed()) {
+    relayout();
+    track();
+  }
   const now = ms / 1000;
   const dt = lastFrame ? Math.min(now - lastFrame, 1 / 20) : 1 / 60;
   lastFrame = now;
@@ -186,7 +198,6 @@ const frame = (ms: number) => {
   goo.frame({ now, dt, tracker, reducedMotion, sinceIntro: now - droppedAt, eff });
   sceneHost.frame(now);
   tracker.endFrame();
-  syncBleed();
   afterFrame?.();
   afterFrame = null;
 
@@ -270,6 +281,9 @@ async function start() {
     sceneHost.attach(next, root);
     refreshPage();
     relayout();
+    // A floating button's shadow needs a wider canvas: settle its size now, so the drop isn't rebuilt at rest later.
+    if (syncBleed()) relayout();
+    dropped = true;
     quietSince = clock();
     frame(performance.now());
   } catch (err) {
@@ -307,7 +321,7 @@ function dropAgain() {
 }
 
 // The tuning panel loads on demand (the "Tweak the goo" button, or ?tune in the URL).
-let guiPromise: Promise<GUI> | null = null;
+let guiPromise: Promise<Tuning> | null = null;
 let guiOpen = false;
 async function toggleTuning(open = !guiOpen) {
   guiOpen = open;

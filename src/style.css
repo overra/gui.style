@@ -53,7 +53,8 @@ body {
   justify-items: center;
   padding: max(24px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
     max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
-  overflow-x: clip;
+  /* The goo canvas reaches past the button (further under a floating button's shadow): never let it add scroll. */
+  overflow: clip;
   text-align: center;
 }
 

@@ -120,6 +120,16 @@ export class FingerTracker {
     for (const id of this.fingers.keys()) this.release(id, now);
   }
 
+  /** Goo space moved under the contacts (the canvas grew or shrank around the goo): keep each on its spot. */
+  shift(dx: number, dy: number): void {
+    for (const f of this.fingers.values()) {
+      f.x += dx;
+      f.y += dy;
+      f.px += dx;
+      f.py += dy;
+    }
+  }
+
   /** True while the contact is pressing (including the minimum-press tail of a quick tap). */
   pressing(f: Finger, now: number): boolean {
     return now < f.liftAt;

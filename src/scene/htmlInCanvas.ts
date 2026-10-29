@@ -55,8 +55,10 @@ export function createUiPlane(
   // A drawable's canvas needs a rendering context before its elements can be drawn anywhere.
   canvas.getContext('2d');
   // Holds the element's place in the page flow, so the page box (and the page canvas sized to it) doesn't collapse.
+  // It is as tall as the viewport and sits above the scene canvas, so it must let pointer input through to it.
   const placeholder = document.createElement('div');
   placeholder.setAttribute('aria-hidden', 'true');
+  placeholder.style.pointerEvents = 'none';
   let tex: UiTexture | null = null;
   let attached = false;
   let savedWidth = '';

@@ -46,6 +46,8 @@ const SUBSTEP = 1 / 600;
 const MAX_TILT = 0.15;
 /** Even bottomed out, the base keeps this share of the rest gap between itself and the page. */
 const MIN_GAP = 0.1;
+/** Putty under a finger (CSS px of rest height) for it to push with full weight: touches.ts' thinnest surface. */
+const FULL_CONTACT = 4;
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
@@ -126,16 +128,19 @@ export function createLevitation() {
     const gap = Math.max(hover + pageDepth, 0);
     const lev = eff.levitation;
 
-    // Each finger pushes with the share of a full press it has sunk in: its dent's own ramp, creep and skim.
+    // Each finger pushes with the share of a full press it has sunk in: its dent's own ramp, creep and skim. Only
+    // putty under the finger pushes: one slid off the button (and still held) leans on nothing.
     let push = 0;
     let mx = 0;
     let my = 0;
     for (const f of tracker.fingers.values()) {
       const pen = Math.max(0, f.depth - f.lift);
-      const w = Math.min(pen / Math.max(f.surfaceZ * eff.finger.depthFrac, 1), 1.5);
+      const under = restHeightCpu(sceneSdf(c.shapes, f.x, f.y, params.shape.blend));
+      const contact = clamp(under / FULL_CONTACT, 0, 1);
+      const w = contact * Math.min(pen / Math.max(f.surfaceZ * eff.finger.depthFrac, 1), 1.5);
       push += w;
-      mx += w * (f.x - c.pivot[0]);
-      my += w * (f.y - c.pivot[1]);
+      mx += w * clamp(f.x - c.pivot[0], -c.reachX, c.reachX);
+      my += w * clamp(f.y - c.pivot[1], -c.reachY, c.reachY);
     }
 
     // Targets: a full press sinks the button by `travel`. An off-centre press also tilts it like a rigid plate on
