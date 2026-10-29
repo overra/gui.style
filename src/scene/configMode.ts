@@ -268,9 +268,23 @@ export function createConfigMode(deps: ConfigDeps) {
       done: () => {
         phase = 'on';
         showChrome(true);
+        rebaseGestures();
       },
     };
     deps.wake();
+  }
+
+  /** The fly-in overrides the camera every frame: a drag or pinch begun during it starts over from where it landed. */
+  function rebaseGestures() {
+    const held = [...pointers.values()];
+    if (drag && (drag.kind === 'orbit' || drag.kind === 'pan') && held[0]) {
+      drag.x0 = held[0].x;
+      drag.y0 = held[0].y;
+      drag.pose0 = copyPose(pose);
+    }
+    if (pinch && held.length >= 2) {
+      pinch = { dist: Math.max(1, Math.hypot(held[0].x - held[1].x, held[0].y - held[1].y)), distance0: pose.distance };
+    }
   }
 
   function exit() {
@@ -848,15 +862,17 @@ export function createConfigMode(deps: ConfigDeps) {
         // The finger slides across the putty by the pointer's movement, measured at the height it pressed in and in
         // the goo's frame as it is now. A still pointer leaves the finger where it is while the cushion sinks and
         // tilts the button under it; re-casting the absolute ray would snap it across the putty instead.
+        // Only pointer positions whose rays meet that height count: past the horizon the finger waits, and the next
+        // move that casts again is measured from the last one that did, so it comes back under the pointer.
         const layout = deps.layout();
         const f = deps.tracker.fingers.get(drag.id);
-        if (layout && f) {
+        const b = layout ? gooPlanePoint(cam, x, y, layout, drag.z) : null;
+        if (layout && f && b) {
           const a = gooPlanePoint(cam, drag.x, drag.y, layout, drag.z);
-          const b = gooPlanePoint(cam, x, y, layout, drag.z);
-          if (a && b) deps.tracker.move(drag.id, f.x + b[0] - a[0], f.y + b[1] - a[1]);
+          if (a) deps.tracker.move(drag.id, f.x + b[0] - a[0], f.y + b[1] - a[1]);
+          drag.x = x;
+          drag.y = y;
         }
-        drag.x = x;
-        drag.y = y;
         break;
       }
     }

@@ -31,11 +31,13 @@
 }
 
 /* The full-viewport WebGPU canvas; it fades in over the flat page, which then hides underneath it. */
+/* Sized to the fixed containing block (innerWidth × innerHeight), the same box its buffer, rays and picking use;
+   100vh is the large viewport on phones and would stretch the scene under the toolbars. */
 .scene-canvas {
   position: fixed;
   inset: 0;
-  width: 100vw;
-  height: 100vh;
+  width: 100%;
+  height: 100%;
   z-index: -1;
   display: block;
   opacity: 0;
@@ -92,8 +94,8 @@ html.scene-on body {
 .scene-ui-canvas {
   position: fixed;
   inset: 0;
-  width: 100vw;
-  height: 100vh;
+  width: 100%;
+  height: 100%;
   z-index: -1;
   display: block;
   pointer-events: none;

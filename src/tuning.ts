@@ -110,10 +110,19 @@ export function openTuning(hooks: TuningHooks) {
   glass.add(proxy, 'caustics', 0, 0.5, 0.01).name('caustics');
   glass.close();
 
+  // Poll only while the Levitation rows can be seen: the panel shown, and neither it nor the folder collapsed.
+  let shown = false;
+  const follow = () => {
+    const on = shown && !gui._closed && !float._closed;
+    for (const c of followed) c.listen(on);
+  };
+  gui.onOpenClose(follow);
+
   return {
     show(open: boolean) {
+      shown = open;
       gui.show(open);
-      for (const c of followed) c.listen(open);
+      follow();
     },
   };
 }

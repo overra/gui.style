@@ -46,8 +46,6 @@ const SUBSTEP = 1 / 600;
 const MAX_TILT = 0.15;
 /** Even bottomed out, the base keeps this share of the rest gap between itself and the page. */
 const MIN_GAP = 0.1;
-/** Putty under a finger (CSS px of rest height) for it to push with full weight: touches.ts' thinnest surface. */
-const FULL_CONTACT = 4;
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
@@ -135,8 +133,10 @@ export function createLevitation() {
     let my = 0;
     for (const f of tracker.fingers.values()) {
       const pen = Math.max(0, f.depth - f.lift);
-      const under = restHeightCpu(sceneSdf(c.shapes, f.x, f.y, params.shape.blend));
-      const contact = clamp(under / FULL_CONTACT, 0, 1);
+      // The push fades over the fingertip pad as it crosses the putty's edge: full a pad radius inside, half on the
+      // edge, none a pad radius outside (the wall is too steep to fade by the height under the finger's center).
+      const sd = sceneSdf(c.shapes, f.x, f.y, params.shape.blend);
+      const contact = clamp(0.5 - sd / (2 * Math.min(f.ax, f.ay)), 0, 1);
       const w = contact * Math.min(pen / Math.max(f.surfaceZ * eff.finger.depthFrac, 1), 1.5);
       push += w;
       mx += w * clamp(f.x - c.pivot[0], -c.reachX, c.reachX);

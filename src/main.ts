@@ -115,12 +115,11 @@ function relayout() {
     gooCanvas.width = w;
     gooCanvas.height = h;
   }
-  const before = layout?.shapes[0];
+  const before = layout;
   layout = measureLayout(gooCanvas, buttons, params.sim.cell, pageBox());
-  // Goo space starts at the canvas' corner. When the canvas grows or shrinks around the button (a floating button's
-  // shadow), held fingers move with the button, so they stay where they pressed.
-  const after = layout.shapes[0];
-  if (before && after) tracker.shift(after.cx - before.cx, after.cy - before.cy);
+  // Goo space starts at the canvas' corner. When the canvas moves on the page (it grows around a floating button's
+  // shadow, or the page reflows), held fingers keep their spot on the page, under a pointer that hasn't moved.
+  if (before) tracker.shift(before.canvasX - layout.canvasX, before.canvasY - layout.canvasY);
   // Drop the goo onto the page the first time it appears (unless motion is reduced). start() settles the canvas size
   // before it marks the goo dropped, so the drop lands on the final grid.
   const drop = !dropped && !motionQuery.matches;
