@@ -22,8 +22,17 @@ export interface Effective {
   levitation: { travel: number; omega: number; zeta: number; tilt: number };
 }
 
-export function effectiveParams(): Effective {
-  const { feel, elastic, plastic, heal, finger, detail, intro, sim, levitation } = params;
+/** Gravity in a goo element's rest frame (g): along its x and y axes, and into its base (n > 0 presses it on). */
+export interface GooGravity {
+  x: number;
+  y: number;
+  n: number;
+}
+
+export const NO_GRAVITY: GooGravity = { x: 0, y: 0, n: 0 };
+
+export function effectiveParams(gravity: GooGravity = NO_GRAVITY): Effective {
+  const { feel, material, elastic, plastic, heal, finger, detail, intro, sim, levitation } = params;
   const dt = sim.substep;
   const v = ratio(feel.viscosity, 4);
   const s = ratio(feel.elasticity, 2.8);
@@ -31,13 +40,22 @@ export function effectiveParams(): Effective {
   const i = feel.imprint;
   const f = feel.fingerprint;
 
+  // Material: adhesion holds the contact line and makes the page wettable (smears stay put), cohesion is the yield,
+  // surface tension levels the putty and the printed ridges, density is the weight gravity pulls on.
+  const pin = plastic.pin * ratio(material.adhesion, 3);
+  const dewet = plastic.dewet * ratio(1 - material.adhesion, 2);
+  const tension = plastic.surfaceTension * ratio(material.surfaceTension, 3);
+  const weight = plastic.weight * ratio(material.density, 20);
+
   // Viscosity: thicker putty damps its flow harder, flows less freely, creeps, heals and wobbles slower.
   const fluxDamping = plastic.fluxDamping * v;
   const decay = Math.exp(-fluxDamping * dt);
-  // Creep is an explicit diffusion too: keep dt·Mc·K well inside its own limit.
-  const stiffness = 8 * (2 + Math.max(plastic.contact, plastic.dewet) + 8 * plastic.surfaceTension);
+  // Creep is an explicit diffusion too: keep dt·Mc·K well inside its own limit. K's largest restoring head is the
+  // intro's 2·memory plus the weight pressing into the base (a floor page); 2 at the defaults, as before.
+  const headMax = 2 * plastic.memory + weight * Math.max(gravity.n, 0);
+  const stiffness = 8 * (headMax + Math.max(plastic.contact, dewet) + 8 * tension);
   const creep = Math.min(plastic.creep / v, 1.2 / (dt * stiffness));
-  // Keep the explicit flux update stable whatever the sliders say (checkerboard mode, intro's G = 2, 10% margin):
+  // Keep the explicit flux update stable whatever the sliders say (checkerboard mode, headMax, 10% margin):
   // dt²·KP·K + dt·Mc·K·(1 + d) ≤ 2(1 + d), d = e^(−GP·dt).
   let fluxGain = plastic.fluxGain * Math.min(1, 1 / v);
   fluxGain = Math.min(
@@ -63,8 +81,12 @@ export function effectiveParams(): Effective {
       fluxGain,
       fluxDamping,
       creep,
+      pin,
+      dewet,
+      weight,
+      surfaceTension: tension,
       // Doughy putty yields easily and keeps most of the dent; bouncy putty holds its shape and springs back.
-      yieldHead: plastic.yieldHead * (0.5 + e),
+      yieldHead: plastic.yieldHead * (0.5 + e) * ratio(material.cohesion, 2),
       plasticShare: clamp(plastic.plasticShare - (e - 0.5) * 0.9 + (i - 0.5) * 0.3, 0.08, 0.95),
     },
     heal: {
@@ -76,7 +98,7 @@ export function effectiveParams(): Effective {
     detail: {
       ...detail,
       fadeTau: detail.fadeTau * v ** 0.5 * (0.6 + 0.8 * f),
-      smoothing: detail.smoothing / v ** 0.5,
+      smoothing: (detail.smoothing / v ** 0.5) * ratio(material.surfaceTension, 3),
     },
     introDamping: intro.liquidDamping * v,
     visual: {

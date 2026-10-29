@@ -6,10 +6,11 @@ space.
 The first one is **Liquid Glass Goo**, a WebGPU button made of glassy putty, built with [TypeGPU](https://typegpu.com)
 and `@typegpu/sdf`.
 
-The putty rests on the page; gravity points into the screen, so the page is the ground it sits on. Press it and a
-fingertip dent sinks in, pushing material into a raised rim and printing your fingerprint into the surface. Let go
-and it springs back with a little wobble, keeps the imprint for a moment, then heals back into smooth, glossy glass.
-Drag through it and you plough a trough full of smeared ridges.
+The putty clings to the page. Adhesion holds its edge, cohesion (a yield stress and a memory of its molded shape)
+holds its form, and surface tension rounds and smooths it. Gravity is a scene setting, down the page by default, and
+the default putty holds against it. Press it and a fingertip dent sinks in, pushing material into a raised rim and
+printing your fingerprint into the surface. Let go and it springs back with a little wobble, keeps the imprint for a
+moment, then heals back into smooth, glossy glass. Drag through it and you plough a trough full of smeared ridges.
 
 ```bash
 npm install
@@ -31,13 +32,28 @@ The **Tweak the goo** button (bottom right, or `?tune` in the URL) opens a live 
 | imprint | subtle → exaggerated | press depth, how long the imprint lingers, and a visual depth boost for the dent |
 | fingerprint | none → exaggerated | ridge prominence (shading gain), how long the print lasts, smudge haze |
 
-Presets (glass putty, jelly, honey, modeling clay, crime scene) set all four at once. The collapsed folders below
-them expose the base physics, fingerprint and glass values the sliders scale. Stability guards keep the explicit
-solver within its limits at any setting.
+Presets (glass putty, jelly, honey, modeling clay, crime scene, slime on a wall) set them all at once. The collapsed
+folders below them expose the base physics, fingerprint and glass values the sliders scale. Stability guards keep the
+explicit solver within its limits at any setting.
 
-The **Levitation** folder lifts the button off the page: a hover height (0 by default, or `?hover=40` in the URL),
+The **Material** folder sets what holds the putty and what gravity pulls on, again 0 to 1 with 0.5 as the default:
+
+| Slider | 0 → 1 | What it drives |
+|---|---|---|
+| adhesion | slips → sticks | how hard the contact line holds, and how strongly the bare page refuses to be wetted |
+| cohesion | runny → holds | the yield stress |
+| surface tension | wrinkly → smooth | capillary smoothing of the putty and of the printed ridges |
+| density | light → heavy | the putty's weight per g of gravity |
+
+Below it, "under gravity" says what the putty does: it holds, weeps at its edge, or sags until its yield holds it.
+
+The **Gravity** folder sets the scene's gravity: a direction (down the page, into it like a floor, out of it like a
+ceiling, or weightless), a strength in g, and its angles along and into the page. `?gravity=floor` (or `wall`,
+`ceiling`, `off`, or `x,y,z` in g) sets it from the URL.
+
+The **Levitation** folder lifts the button off the page: a hover distance (0 by default, or `?hover=40` in the URL),
 plus the press travel, stiffness, damping and tilt of the air cushion it floats on. A press then pushes the whole
-button down and tilts it toward the finger, and it springs back. See `docs/3d-config-view.md`.
+button toward the page and tilts it toward the finger, and it springs back. See `docs/3d-config-view.md`.
 
 ## Interaction
 
@@ -53,9 +69,11 @@ button down and tilts it toward the finger, and it springs back. See `docs/3d-co
 
 Press **C** (or the **3D scene** button, shown in dev and with `?scene` or `?tune`) to step out of the page. The view
 flies to a 3/4 view of the scene: the camera and its frustum, the page as a plane behind the screen, the light rig,
-two probe balls and the goo.
+two probe balls, the goo and an arrow for gravity. The page stands upright like a screen on a wall, and the view
+orbits around world up with a level horizon. From behind, the page shows its dark back.
 
-- Drag to orbit, right- or shift-drag to pan, scroll or pinch to zoom.
+- Drag to orbit: the scene turns the way you drag, about the goo. Right- or shift-drag to pan, scroll or pinch to
+  zoom (shift+scroll is kept for scrolling down a tall page later).
 - Drag a light or the page's blue depth handle, or press the goo from any angle.
 - F, O and V fly to the goo, an overview and the camera. Esc or C goes back.
 
@@ -69,17 +87,23 @@ button plus a margin. The same page pixels are uploaded as a texture so the glas
 The button label is a separate mask printed on the page, so it is only ever seen through the glass.
 
 **Resting shape.** Each goo element is a rounded box from `sdRoundedBox2d`. Its signed distance drives a height
-profile `H0 (1 − (1 − t)³)^(1/2)`: a steep, non-wetting putty wall that joins a flat, gravity-flattened top.
+profile `H0 (1 − (1 − t)³)^(1/2)`: a steep, non-wetting putty wall that joins a flat top. This is its molded
+shape, the one it remembers.
 
 **Putty physics** (`src/gpu/simKernels.ts`, 3 CSS px cells, 480 Hz fixed substeps). There are two layers:
 
 - **Elastic layer.** A damped membrane on a spring foundation. It gives the instant spring-back and the ~7 Hz wobble.
-- **Plastic layer.** A volume-conserving viscoplastic flow with a yield stress, using signed face fluxes, inertia and
-  an outflow limiter. Gravity and surface tension act as a pressure head. Material pushed out from under the finger
-  piles into a rim. Below the yield head the putty holds its shape, so the imprint lingers.
+- **Plastic layer.** A volume-conserving viscoplastic flow with a yield stress (cohesion), using signed face fluxes,
+  inertia and an outflow limiter. Shape memory and surface tension act as a pressure head; the bare page around the
+  putty refuses to be wetted, and the contact line holds a small head before it creeps (adhesion). Gravity adds its
+  weight into the base and a drop along it. Material pushed out from under the finger piles into a rim. Below the
+  yield head the putty holds its shape, so the imprint lingers.
+- **Settling.** When the material can't hold its molded shape under gravity (heavy enough, or weak enough), a second,
+  finger-free copy of the plastic layer finds the shape the yield arrests it in: a sag. The live putty heals back to
+  that shape. A sag that would thin its top away is held there, since drips don't exist yet.
 - **Self-healing.** Cells near a pressing finger keep their imprint. Everywhere else the plastic layer eases back to
-  the resting shape after a short hold.
-- **Intro.** On load the goo drops onto the page as a taller, narrower blob of equal volume, slumps as a liquid, and
+  its resting shape (molded, or sagged) after a short hold.
+- **Intro.** On load the goo lands on the page as a taller, narrower blob of equal volume, slumps as a liquid, and
   then sets into putty.
 
 **Fingerprints** (`src/gpu/detailKernels.ts`, 0.5 CSS px texels).
@@ -101,8 +125,9 @@ profile `H0 (1 − (1 − t)³)^(1/2)`: a steep, non-wetting putty wall that joi
 
 The output is premultiplied, so outside the goo only the shadow is drawn.
 
-Everything is recorded into one command encoder per frame. The loop sleeps once the goo has healed and snaps back
-to the exact resting state, so an idle page costs nothing.
+Everything is recorded into one command encoder per frame (plus a small readback every 30 frames while a sag
+settles). The loop sleeps once the goo has healed and snaps back to the exact resting state, so an idle page costs
+nothing.
 
 ## Files
 
@@ -122,7 +147,8 @@ to the exact resting state, so an idle page costs nothing.
 | `src/scene/host.ts` | Feeds the scene to the glass in normal mode; loads the 3D view on demand |
 | `src/scene/configMode.ts`, `src/scene/htmlInCanvas.ts` | The 3D view: orbit camera, gizmos, panel, picking; page UI via html-in-canvas |
 | `src/gpu/sceneView.ts`, `src/gpu/sceneShaders.ts` | Ray-traces the 3D view |
-| `src/tuning.ts` | `?tune` panel (lil-gui, loaded on demand) |
+| `src/tuning.ts`, `src/materialPanel.ts` | `?tune` panel (lil-gui, loaded on demand); the Material and Gravity folders both panels share |
+| `src/feel.ts` | The feel and material macros, and the solver's stability guards |
 
 ## Dev harness
 
@@ -136,6 +162,9 @@ __goo.release(id);
 const after = __goo.drive(300);
 __goo.show([held, after], 3);       // magnified contact sheet
 __goo.realtime();                   // back to requestAnimationFrame
+
+__goo.sag();                        // what the material does under gravity: regime, sag numbers, settle phase
+await __goo.readSim();              // per-cell copies of the simulation state (e, v, m, age, settled shape ms)
 ```
 
 Vector math in shader code uses `.add()` / `.mul()` / `std.*` rather than operators, because operator overloading

@@ -14,7 +14,7 @@ export interface Softbox {
   soft: number;
 }
 
-/** A rounded-rect area light, placed by polar angle from +z and screen azimuth. */
+/** A rounded-rect area light, placed by polar angle from +z (out of the page) and screen azimuth. */
 function softbox(
   polarDeg: number,
   azDeg: number,
@@ -43,7 +43,7 @@ const shared = {
   /** Apparent-depth lens term (CSS px): a small standoff that lets the steep wall lens without folding. */
   depthLens: 4,
   iorG: 1.5,
-  /** Up-left key light, ~50° elevation. */
+  /** Key light 33° above the goo and 25° to its left: 41° off the screen's axis, toward the top-left. */
   lightDir: [-0.35, -0.55, 0.76] as [number, number, number],
   lightColor: [3.0, 2.95, 2.85] as [number, number, number],
   sunRadius: 0.052,
@@ -51,7 +51,7 @@ const shared = {
   hazeRoughness: 0.12,
   rimLod: 0.3,
   lodMax: 2.5,
-  /** Reflections use a perspective eye this far above the viewport center, so flat glass shows a sheen. */
+  /** Reflections use a perspective eye this far in front of the viewport center, so flat glass shows a sheen. */
   eyeDist: 1400,
   glintWidth: 1.1,
   aoWidth: 1.5,
@@ -85,7 +85,7 @@ export const looks = {
     causticAdd: 0,
     glowPeak: 0.08,
     softboxes: [
-      softbox(16, -122, 0.3, 0.22, 0.08, 0.1, scale3(1.6, [1, 0.99, 0.97])), // overhead sheen
+      softbox(16, -122, 0.3, 0.22, 0.08, 0.1, scale3(1.6, [1, 0.99, 0.97])), // front sheen
       softbox(52, -122, 0.42, 0.11, 0.05, 0.03, scale3(8, [1, 0.98, 0.95])), // key strip → top-left arc
       softbox(60, 58, 0.35, 0.08, 0.04, 0.04, scale3(2.4, [0.92, 0.96, 1])), // cool kicker → bottom-right arc
     ],

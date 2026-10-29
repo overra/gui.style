@@ -3,27 +3,37 @@
 import GUI from 'lil-gui';
 import type { Theme } from './background.ts';
 import { looks } from './look.ts';
+import { addGravityFolder, addMaterialFolder, type MaterialHooks } from './materialPanel.ts';
 import { params } from './params.ts';
 import { MAX_HOVER } from './scene/scene.ts';
 
-export interface TuningHooks {
+export interface TuningHooks extends MaterialHooks {
   theme: () => Theme;
   wake: () => void;
   replayDrop: () => void;
   tap: () => void;
-  /** The goo's place in the scene (scene/scene.ts): its hover height above the page. */
+  /** The goo's place in the scene (scene/scene.ts): how far it hovers in front of the page. */
   goo: { hover: number };
 }
 
 type Feel = typeof params.feel;
+type Material = typeof params.material;
+
+/** The material macros' base values; a preset that doesn't set them goes back to these. */
+const NEUTRAL: Material = { adhesion: 0.5, cohesion: 0.5, surfaceTension: 0.5, density: 0.5 };
 
 /** A few characters to start from; every slider can be adjusted afterwards. */
-const PRESETS: Record<string, Feel> = {
-  'Glass putty': { viscosity: 0.5, elasticity: 0.5, imprint: 0.5, fingerprint: 0.5 },
-  Jelly: { viscosity: 0.2, elasticity: 0.95, imprint: 0.3, fingerprint: 0.3 },
-  Honey: { viscosity: 0.95, elasticity: 0.1, imprint: 0.55, fingerprint: 0.35 },
-  'Modeling clay': { viscosity: 0.85, elasticity: 0.05, imprint: 0.9, fingerprint: 0.8 },
-  'Crime scene': { viscosity: 0.6, elasticity: 0.35, imprint: 0.8, fingerprint: 1 },
+const PRESETS: Record<string, { feel: Feel; material?: Partial<Material> }> = {
+  'Glass putty': { feel: { viscosity: 0.5, elasticity: 0.5, imprint: 0.5, fingerprint: 0.5 } },
+  Jelly: { feel: { viscosity: 0.2, elasticity: 0.95, imprint: 0.3, fingerprint: 0.3 } },
+  Honey: { feel: { viscosity: 0.95, elasticity: 0.1, imprint: 0.55, fingerprint: 0.35 } },
+  'Modeling clay': { feel: { viscosity: 0.85, elasticity: 0.05, imprint: 0.9, fingerprint: 0.8 } },
+  'Crime scene': { feel: { viscosity: 0.6, elasticity: 0.35, imprint: 0.8, fingerprint: 1 } },
+  // Heavy and weak enough to slump under gravity (down the page by default) until its yield holds it.
+  'Slime on a wall': {
+    feel: { viscosity: 0.7, elasticity: 0.2, imprint: 0.6, fingerprint: 0.3 },
+    material: { adhesion: 0.7, cohesion: 0.15, surfaceTension: 0.5, density: 0.9 },
+  },
 };
 
 export function openTuning(hooks: TuningHooks) {
@@ -36,8 +46,9 @@ export function openTuning(hooks: TuningHooks) {
     .add(preset, 'name', Object.keys(PRESETS))
     .name('preset')
     .onChange((name: string) => {
-      Object.assign(params.feel, PRESETS[name]);
-      feel.controllersRecursive().forEach((c) => c.updateDisplay());
+      Object.assign(params.feel, PRESETS[name].feel);
+      Object.assign(params.material, NEUTRAL, PRESETS[name].material);
+      gui.controllersRecursive().forEach((c) => c.updateDisplay());
     });
   feel.add(params.feel, 'viscosity', 0, 1, 0.01).name('viscosity (thin → thick)');
   feel.add(params.feel, 'elasticity', 0, 1, 0.01).name('elasticity (doughy → bouncy)');
@@ -46,12 +57,20 @@ export function openTuning(hooks: TuningHooks) {
   feel.add({ drop: hooks.replayDrop }, 'drop').name('Drop it again');
   feel.add({ tap: hooks.tap }, 'tap').name('Tap the middle');
 
-  // Levitation: lift the button off the page; presses then push the whole button down and tilt it, and it springs
-  // back. The 3D scene view (C) shows the same values in its own panel, so these follow its edits while this panel
-  // shows (show() below; a listening controller polls every frame, so it stops while the panel is hidden).
+  // What holds the putty (adhesion, cohesion, surface tension) and what pulls on it (density × gravity). Gravity
+  // is the scene's: the 3D view's panel edits the same values.
+  const material = addMaterialFolder(gui, hooks);
+  const gravity = addGravityFolder(gui, hooks);
+
+  // Levitation: lift the button off the page; presses then push the whole button toward the page and tilt it, and
+  // it springs back. The 3D scene view (C) shows the same values in its own panel, so these (and the material and
+  // gravity rows) follow its edits while this panel shows (show() below; a listening controller polls every frame,
+  // so it stops while the panel is hidden).
   const float = gui.addFolder('Levitation');
   const followed = [
-    float.add(hooks.goo, 'hover', 0, MAX_HOVER, 1).name('hover height (px)'),
+    ...material.live,
+    ...gravity.live,
+    float.add(hooks.goo, 'hover', 0, MAX_HOVER, 1).name('hover distance (px)'),
     float.add(params.levitation, 'travel', 0, 30, 0.5).name('press travel (px)'),
     float.add(params.levitation, 'stiffness', 1, 15, 0.1).name('stiffness (Hz)'),
     float.add(params.levitation, 'damping', 0.05, 1.2, 0.01).name('damping (bouncy → still)'),
@@ -65,6 +84,10 @@ export function openTuning(hooks: TuningHooks) {
   physics.add(params.elastic, 'omega', 15, 90, 1).name('wobble speed');
   physics.add(params.plastic, 'plasticShare', 0, 1, 0.01).name('imprint share');
   physics.add(params.plastic, 'yieldHead', 0, 6, 0.1).name('yield (rim)');
+  physics.add(params.plastic, 'memory', 0, 3, 0.05).name('shape memory');
+  physics.add(params.plastic, 'pin', 0, 1, 0.01).name('contact-line hold (px)');
+  physics.add(params.plastic, 'dewet', 0, 30, 0.5).name('dewetting');
+  physics.add(params.plastic, 'weight', 0, 1, 0.005).name('weight per g');
   physics.add(params.plastic, 'fluxDamping', 20, 400, 1).name('flow damping');
   physics.add(params.heal, 'hold', 0, 2, 0.05).name('imprint hold (s)');
   physics.add(params.heal, 'tau', 0.2, 4, 0.05).name('heal time (s)');
@@ -110,11 +133,10 @@ export function openTuning(hooks: TuningHooks) {
   glass.add(proxy, 'caustics', 0, 0.5, 0.01).name('caustics');
   glass.close();
 
-  // Poll only while the Levitation rows can be seen: the panel shown, and neither it nor the folder collapsed.
+  // Poll only while the rows can be seen: the panel shown, and neither it nor their folder collapsed.
   let shown = false;
   const follow = () => {
-    const on = shown && !gui._closed && !float._closed;
-    for (const c of followed) c.listen(on);
+    for (const c of followed) c.listen(shown && !gui._closed && !c.parent._closed);
   };
   gui.onOpenClose(follow);
 

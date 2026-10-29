@@ -1,12 +1,15 @@
 // Config mode: the scene ray-traced from an orbit camera into a full-viewport canvas. World frame = the flat
 // shader's screen frame (x right, y down, z toward the viewer, CSS px), origin at the viewport center on the
-// reference plane z = 0, where the goo sits. The page plane lies at z = planeZ ≤ 0.
+// reference plane z = 0, where the goo sits. The page plane lies at z = planeZ ≤ 0. The page stands upright: world
+// up is screen-up (−y), so the backdrop is lighter above eye level and the page plane's extension is a gridded wall.
+// The glass's studio stays page-relative (its zenith is the page's axis, +z), as a screen reflects the room in
+// front of it.
 //
 // One full-screen pass finds the nearest of: the goo height field (marched at grid resolution, then bisected),
-// the page plane, the light emitters and two probe balls. The goo reuses the flat shader's surface and glass
-// terms (renderShader.ts), generalized from the fixed top-down view ray to the real one: refraction through the
-// curved top, out of the flat bottom (Snell again) and across the air gap to the page. A second pass draws
-// gizmo lines and dots, dimmed where the scene hides them (it reads the first pass's view depth).
+// the page plane (seen from either side), the light emitters and two probe balls. The goo reuses the flat shader's
+// surface and glass terms (renderShader.ts), generalized from the fixed straight-on view ray to the real one:
+// refraction through the curved top, out of the flat bottom (Snell again) and across the air gap to the page. A
+// second pass draws gizmo lines and dots, dimmed where the scene hides them (it reads the first pass's view depth).
 //
 // The goo has its own frame (scene.ts: gooFrame): it floats, sinks and tilts with the levitation pose. Rays are
 // marched in that frame, so the height field and its lookups stay exactly the flat shader's.
@@ -43,6 +46,10 @@ export const MAX_DOTS = 64;
 const BIG = 1e9;
 const MARCH = 96;
 const PI = Math.PI;
+/** Screen-up, the 3D view's world up. */
+const WORLD_UP = tgpu.const(d.vec3f, d.vec3f(0, -1, 0));
+/** The page seen from behind: a dark, unprinted back. */
+const PAGE_BACK = tgpu.const(d.vec3f, d.vec3f(0.03, 0.032, 0.036));
 
 export const SceneLight = d.struct({
   /** Emitter center (world). */
@@ -179,10 +186,18 @@ const raySphere = (o: d.v3f, dir: d.v3f, sph: d.v4f) => {
   return t;
 };
 
-/** Ray parameter on the plane z = z0 (BIG when the ray doesn't head down to it). */
-const rayDownZ = (o: d.v3f, dir: d.v3f, z0: number) => {
+/** Ray parameter on the plane z = z0 from its front (+z) side only (BIG otherwise). */
+const rayToZFront = (o: d.v3f, dir: d.v3f, z0: number) => {
   'use gpu';
   return std.select(d.f32(BIG), (z0 - o.z) / std.min(dir.z, -1e-6), dir.z < -1e-6 && o.z > z0);
+};
+
+/** Ray parameter on the plane z = z0 from either side (BIG when parallel or behind the origin). */
+const rayToZ = (o: d.v3f, dir: d.v3f, z0: number) => {
+  'use gpu';
+  const ok = std.abs(dir.z) >= 1e-6;
+  const t = (z0 - o.z) / std.select(d.f32(1e-6), dir.z, ok);
+  return std.select(d.f32(BIG), t, ok && t > 0);
 };
 
 /**
@@ -193,8 +208,13 @@ const heightAt = (g: d.v2f) => {
   'use gpu';
   const P = L.$.params;
   const size = d.vec2f(std.textureDimensions(L.$.sim, 0));
-  const disp = std.textureSampleLevel(L.$.sim, L.$.smp, g.div(P.simCell).div(size), 0).x * P.imprintGain;
-  return restProfile(footprint(g), d.f32(0)).x + disp;
+  const tap = g.div(P.simCell).div(size);
+  const disp = std.textureSampleLevel(L.$.sim, L.$.smp, tap, 0).x * P.imprintGain;
+  // Plus the settled sag (cover .y), drawn as is, inside the resting outline (its lip past it isn't drawn, as in
+  // the flat shader's coverage).
+  const sg = footprint(g);
+  const settled = std.textureSampleLevel(L.$.cover, L.$.smp, tap, 0).y * std.select(d.f32(1), d.f32(0), sg.x > 0);
+  return restProfile(sg, d.f32(0)).x + disp + settled;
 };
 
 /** World → goo space: (x, y, height above the goo's base). */
@@ -289,7 +309,7 @@ const irradiance = (p: d.v3f, n: d.v3f) => {
   return e;
 };
 
-/** Sky light on a surface facing n. */
+/** Sky light on a surface facing n. Its zenith is the page's axis (+z): the glass's studio, which the probes see. */
 const ambient = (n: d.v3f) => {
   'use gpu';
   const P = L.$.params;
@@ -302,8 +322,8 @@ const paperLight = (p: d.v3f) => {
   const S = sceneLayout.$.scene;
   let k = d.vec3f(1);
   if (S.pageLit > 0) {
-    const up = d.vec3f(0, 0, 1);
-    const e = irradiance(p, up).add(ambient(up));
+    const n = d.vec3f(0, 0, 1);
+    const e = irradiance(p, n).add(ambient(n));
     k = std.mix(d.vec3f(1), e.div(S.irradianceRef), S.pageLit);
   }
   return k;
@@ -343,11 +363,11 @@ const traceEmitters = (o: d.v3f, dir: d.v3f) => {
   return EmitterHit({ t: tBest, col: col });
 };
 
-/** Backdrop: a soft gradient, and a grid on the page plane's endless extension. */
+/** Backdrop: a soft gradient, lighter above eye level, and a grid on the page plane's endless extension (a wall). */
 const backdrop = (dir: d.v3f, grid: number) => {
   'use gpu';
   const S = sceneLayout.$.scene;
-  const sky = std.mix(S.voidBottom, S.voidTop, std.saturate(dir.z * 0.7 + 0.5));
+  const sky = std.mix(S.voidBottom, S.voidTop, std.saturate(std.dot(dir, WORLD_UP.$) * 0.7 + 0.5));
   return sky.add(d.vec3f(grid * S.gridAlpha));
 };
 
@@ -357,7 +377,7 @@ const chromeEnv = (o: d.v3f, r: d.v3f) => {
   const S = sceneLayout.$.scene;
   let col = backdrop(r, d.f32(0));
   let tBest = d.f32(BIG);
-  const tp = rayDownZ(o, r, S.planeZ);
+  const tp = rayToZFront(o, r, S.planeZ);
   if (tp < BIG * 0.5) {
     const w = o.add(r.mul(tp));
     const px = w.xy.div(S.planeScale).add(S.viewportCss.mul(0.5));
@@ -447,8 +467,9 @@ export const sceneFragment = tgpu.fragmentFn({
   const dir = std.normalize(S.fwd.add(S.rightV.mul(ndc.x * S.tanX)).add(S.upV.mul(ndc.y * S.tanY)));
   const eye = S.eye;
 
-  // Page plane, and its endless extension for the grid.
-  const tPlane = rayDownZ(eye, dir, S.planeZ);
+  // Page plane (from either side: the orbit can go behind the wall), and its endless extension for the grid.
+  const tPlane = rayToZ(eye, dir, S.planeZ);
+  const pageFront = eye.z > S.planeZ;
   const wPlane = eye.add(dir.mul(std.min(tPlane, 1e6)));
   const pagePx = wPlane.xy.div(S.planeScale).add(S.viewportCss.mul(0.5));
   const texPerCss = d.f32(std.textureDimensions(L.$.page, 0).x) / S.viewportCss.x;
@@ -459,7 +480,11 @@ export const sceneFragment = tgpu.fragmentFn({
   const gp = wPlane.xy.div(120);
   const gw = std.max(std.fwidth(gp), d.vec2f(1e-4));
   const gl = std.abs(std.fract(gp.add(0.5)).sub(0.5)).div(gw);
-  const fade = std.exp(-std.length(wPlane.xy) / (2.5 * S.viewportCss.x)) * std.saturate(-dir.z * 4);
+  // Only where the ray meets the plane: looking away from it, wPlane is a far point on the ray, not the wall.
+  const fade =
+    std.exp(-std.length(wPlane.xy) / (2.5 * S.viewportCss.x)) *
+    std.saturate(std.abs(dir.z) * 4) *
+    std.select(d.f32(0), d.f32(1), tPlane < BIG * 0.5);
   const grid = (1 - std.saturate(std.min(gl.x, gl.y))) * fade;
 
   // Goo: march its thickness through its bounding box, in its own frame (it may float, sink and tilt), then bisect.
@@ -528,7 +553,9 @@ export const sceneFragment = tgpu.fragmentFn({
     if (tGoo <= tSolid) {
       col = highlightShoulder(shadeGoo3d(g, hHit, dir, nW, surf.sg, surf.H, surf.haze, lod, fwR, a2Filter));
     } else if (tPage <= tSolid) {
-      col = pageOnly(pageQ(wPlane.xy), lodPlane).mul(groundLight(shadowQ(wPlane.xy))).mul(paperLight(wPlane));
+      // From behind, the page shows its dark, unprinted back.
+      const front = pageOnly(pageQ(wPlane.xy), lodPlane).mul(groundLight(shadowQ(wPlane.xy))).mul(paperLight(wPlane));
+      col = std.select(PAGE_BACK.$, front, pageFront);
     } else if (tA <= tSolid) {
       const p = eye.add(dir.mul(tA));
       const n = std.normalize(p.sub(S.probeA.xyz));
@@ -546,8 +573,8 @@ export const sceneFragment = tgpu.fragmentFn({
   }
   const tMin = std.select(tSolid, em.t, emitterFront && S.overlay > 0.5);
 
-  // The live DOM UI on the reference plane (html-in-canvas), in front of whatever it covers.
-  const tUi = rayDownZ(eye, dir, d.f32(0));
+  // The live DOM UI on the reference plane (html-in-canvas), in front of whatever it covers; front side only.
+  const tUi = rayToZFront(eye, dir, d.f32(0));
   const wUi = eye.add(dir.mul(std.min(tUi, 1e6)));
   const uv = wUi.xy.add(S.viewportCss.mul(0.5)).sub(S.uiRect.xy).div(S.uiRect.zw);
   const fu = std.fwidth(uv.mul(d.vec2f(std.textureDimensions(sceneLayout.$.ui, 0))));

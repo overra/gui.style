@@ -49,7 +49,8 @@ export const SimParams = d.struct({
   dampE: d.f32,
   contactE: d.f32,
   // plastic layer
-  gravity: d.f32,
+  /** Restoring head toward the molded shape: shape memory, plus the weight pressing into the base. */
+  restore: d.f32,
   tension: d.f32,
   contactP: d.f32,
   plasticShare: d.f32,
@@ -63,9 +64,11 @@ export const SimParams = d.struct({
   healHold: d.f32,
   healRamp: d.f32,
   healZone2: d.f32,
-  pad0: d.f32,
-  pad1: d.f32,
-  pad2: d.f32,
+  /** Weight along the base: the potential drop it adds across each +x / +y face (head px). */
+  driveX: d.f32,
+  driveY: d.f32,
+  /** Adhesion: the head a contact-line face (putty on one side, bare page on the other) holds. */
+  pinHead: d.f32,
 });
 
 export const DetailParams = d.struct({

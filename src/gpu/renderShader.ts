@@ -358,8 +358,13 @@ const macroAt = (q: d.v2f) => {
   'use gpu';
   const P = L.$.params;
   const size = d.vec2f(std.textureDimensions(L.$.sim, 0));
+  const tap = q.div(P.simCell).div(size);
   const rest = restProfile(footprint(q), d.f32(0));
-  return rest.add(std.textureSampleLevel(L.$.sim, L.$.smp, q.div(P.simCell).div(size), 0).mul(P.imprintGain));
+  // The settled sag (cover .yzw) is drawn as is; only the live deviation is exaggerated.
+  const settled = std.textureSampleLevel(L.$.cover, L.$.smp, tap, 0);
+  return rest
+    .add(std.textureSampleLevel(L.$.sim, L.$.smp, tap, 0).mul(P.imprintGain))
+    .add(d.vec4f(settled.y, settled.z, settled.w, 0));
 };
 
 /**
@@ -445,7 +450,12 @@ const surfaceAt = (p: d.v2f) => {
   const sg = footprint(p);
   const rest = restProfile(sg, d.f32(0));
   const restS = restProfile(sg, 0.5 * P.pxCss);
-  const sim = sampleBSpline(L.$.sim, p.div(P.simCell)).mul(P.imprintGain);
+  // Cover: (total height, settled sag m_s, ∂m_s/∂x, ∂m_s/∂y). The sag is drawn as is; imprintGain exaggerates
+  // only the live deviation from it.
+  const settled = sampleBSpline(L.$.cover, p.div(P.simCell));
+  const sim = sampleBSpline(L.$.sim, p.div(P.simCell))
+    .mul(P.imprintGain)
+    .add(d.vec4f(settled.y, settled.z, settled.w, 0));
   const detail = sampleBSpline(L.$.detail, p.div(P.detailTexel));
   const det = d.vec4f(detail.xyz.mul(P.ridgeGain), detail.w * P.hazeGain);
   const Hm = rest.x + sim.x;
@@ -463,11 +473,19 @@ const surfaceAt = (p: d.v2f) => {
   // the total height at grid resolution decides where there is goo (the bicubic sim can't cancel the analytic
   // wall exactly, which would leave a sliver of glass along the resting outline).
   const covRest = std.saturate(0.5 - sg.x / P.pxCss);
-  const hc = sampleBSpline(L.$.cover, p.div(P.simCell)).x;
-  const thin = std.mix(std.smoothstep(P.filmEps, P.filmEps + 0.8, hc), 1, std.smoothstep(0.6, 0.95, P.materialize));
+  const hc = settled.x;
+  // Where a sag drained the putty, coverage follows the material again (no zero-thickness glass at the outline).
+  const drained = std.smoothstep(0.25, 0.75, -settled.y / std.max(rest.x, 1));
+  const thin = std.mix(
+    std.smoothstep(P.filmEps, P.filmEps + 0.8, hc),
+    1,
+    std.smoothstep(0.6, 0.95, P.materialize) * (1 - drained),
+  );
+  // A settled sag's lip past the outline (a cell-wide film) isn't drawn: only live material spills.
+  const bulgeH = sim.x - settled.y * std.select(d.f32(0), d.f32(1), sg.x > 0);
   const covBulge =
-    std.saturate(0.5 + (sim.x - P.filmEps) / (std.clamp(std.length(sim.yz), 1, 8) * P.pxCss)) *
-    std.smoothstep(0, P.filmEps, sim.x);
+    std.saturate(0.5 + (bulgeH - P.filmEps) / (std.clamp(std.length(sim.yz), 1, 8) * P.pxCss)) *
+    std.smoothstep(0, P.filmEps, bulgeH);
   const cov = std.max(covRest * thin, covBulge * std.select(d.f32(0), d.f32(1), sg.x > -1));
   return Surface({
     n: std.normalize(d.vec3f(gS.mul(-1), 1)),

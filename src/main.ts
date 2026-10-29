@@ -77,7 +77,7 @@ async function requestDevice(): Promise<GPUDevice | null> {
 
 // ---- the live goo ----
 const tracker = new FingerTracker(params.finger);
-/** The whole button's rigid motion when it floats above the page (presses sink and tilt it). */
+/** The whole button's rigid motion when it floats in front of the page (presses sink and tilt it). */
 const levitation = createLevitation();
 let goo: Goo | null = null;
 let layout: Layout | null = null;
@@ -174,13 +174,14 @@ const frame = (ms: number) => {
   const dt = lastFrame ? Math.min(now - lastFrame, 1 / 20) : 1 / 60;
   lastFrame = now;
 
-  const eff = effectiveParams();
+  const gravity = sceneHost.gravity();
+  const eff = effectiveParams(gravity);
   tracker.setTuning(eff.finger);
   tracker.update(now, dt, goo.surfaceAt);
   const { scene } = sceneHost;
   const reducedMotion = motionQuery.matches;
   levitation.step(dt, { hover: scene.goo.hover, pageDepth: scene.page.depth, layout, tracker, eff, reducedMotion });
-  if (tracker.busy || sceneHost.busy || levitation.moving) quietSince = now;
+  if (tracker.busy || sceneHost.busy || levitation.moving || goo.settling) quietSince = now;
   // Sleep only once every imprint, ridge and smudge has visibly healed under the current feel settings.
   const settle = Math.max(
     params.sleepAfter,
@@ -189,12 +190,12 @@ const frame = (ms: number) => {
     5 * eff.detail.hazeTau,
   );
   const sleeping = now - quietSince >= settle;
-  // Going to sleep: snap exactly back to the pristine shape and draw it once.
+  // Going to sleep: snap exactly back to the pristine shape (molded, or the settled sag) and draw it once.
   if (sleeping) {
     goo.snapToRest();
     levitation.reset();
   }
-  goo.frame({ now, dt, tracker, reducedMotion, sinceIntro: now - droppedAt, eff });
+  goo.frame({ now, dt, tracker, reducedMotion, sinceIntro: now - droppedAt, eff, gravity });
   sceneHost.frame(now);
   tracker.endFrame();
   afterFrame?.();
@@ -326,7 +327,15 @@ async function toggleTuning(open = !guiOpen) {
   guiOpen = open;
   tweak?.setAttribute('aria-expanded', String(open));
   guiPromise ??= import('./tuning.ts').then(({ openTuning }) =>
-    openTuning({ theme, wake, replayDrop: dropAgain, tap: () => buttons[0]?.click(), goo: sceneHost.scene.goo }),
+    openTuning({
+      theme,
+      wake,
+      replayDrop: dropAgain,
+      tap: () => buttons[0]?.click(),
+      goo: sceneHost.scene.goo,
+      gravity: sceneHost.scene.gravity,
+      sag: () => (goo ? { regime: goo.sag.regime, phase: goo.settlePhase } : null),
+    }),
   );
   try {
     (await guiPromise).show(guiOpen);
@@ -402,7 +411,7 @@ if (import.meta.env.DEV) {
       params,
       looks,
       tracker,
-      /** The floating button's rigid motion: .pose (height, tilt, pivot), .moving. Hover: __goo.scene.scene.goo. */
+      /** The floating button's rigid motion: .pose (z, tilt, pivot), .moving. Hover: __goo.scene.scene.goo. */
       levitation,
       wake,
       /** The 3D scene: __goo.scene.enter() / exit(), .scene (the model), .identity(), .shot(ms) (see scene/host.ts). */
@@ -435,6 +444,26 @@ if (import.meta.env.DEV) {
         track();
       },
       drop: dropAgain,
+      /** The effective parameters this frame would use (feel and material macros, guard, gravity). */
+      eff: () => effectiveParams(sceneHost.gravity()),
+      /** The last frame's sag check: regime, S, Sedge, K and the face drives; plus the settle layer's phase. */
+      sag: () => (goo ? { ...goo.sag, phase: goo.settlePhase } : null),
+      /** Copies of the simulation state: e, v, m, age and the settled shape ms, per cell (Float32Arrays). */
+      readSim: () => goo?.readState() ?? Promise.resolve(null),
+      /** Straight to the resting state (molded or settled), as when the loop sleeps. */
+      snap() {
+        goo?.snapToRest();
+        levitation.reset();
+      },
+      /** Restart the virtual clock at t (s) and forget the intro (drop() replays it), for runs that must match. */
+      resetClock(t = 1000) {
+        cancelAnimationFrame(rafId);
+        rafId = 0;
+        virtualNow = t;
+        lastFrame = 0;
+        quietSince = t;
+        droppedAt = t - 1e3;
+      },
       /** `crop` is [x, y, w, h] in goo-space CSS px (the canvas extends --goo-m past the button). */
       show(frames: HTMLCanvasElement[], zoom = 2, cols = 2, crop?: [number, number, number, number]) {
         document.getElementById('goo-sheet')?.remove();

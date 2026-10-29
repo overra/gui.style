@@ -12,7 +12,7 @@ import { params } from '../params.ts';
 import type { FingerTracker } from '../touches.ts';
 import type { ConfigMode } from './configMode.ts';
 import { normalize } from './math.ts';
-import { defaultScene, gapSoftening, glassDepthTerms, glassLights, MAX_HOVER, type Scene } from './scene.ts';
+import { defaultScene, gapSoftening, glassDepthTerms, glassLights, gooGravity, MAX_HOVER, type Scene } from './scene.ts';
 import './scene.css';
 
 export interface SceneHostDeps {
@@ -33,9 +33,16 @@ export interface SceneHostDeps {
 export function createSceneHost(deps: SceneHostDeps) {
   const scene: Scene = defaultScene();
   const query = new URLSearchParams(location.search);
-  // ?hover=40 starts with the button floating 40 px above the page.
+  // ?hover=40 starts with the button floating 40 px in front of the page.
   const hover = Number(query.get('hover'));
   if (query.has('hover') && Number.isFinite(hover)) scene.goo.hover = Math.min(Math.max(hover, 0), MAX_HOVER);
+  // ?gravity=wall (the default) | floor | ceiling | off | x,y,z (g, world frame).
+  const GRAVITY: Record<string, [number, number, number]> = { wall: [0, 1, 0], floor: [0, 0, -1], ceiling: [0, 0, 1], off: [0, 0, 0] };
+  const gq = query.get('gravity');
+  if (gq) {
+    const v = GRAVITY[gq] ?? gq.split(',').map(Number);
+    if (v.length === 3 && v.every(Number.isFinite)) scene.gravity.splice(0, 3, ...v.map((c) => Math.min(Math.max(c, -10), 10)));
+  }
   let goo: Goo | null = null;
   let root: TgpuRoot | null = null;
   let config: ConfigMode | null = null;
@@ -146,6 +153,8 @@ export function createSceneHost(deps: SceneHostDeps) {
     detach,
     sceneChanged,
     shadowReach,
+    /** Gravity in the goo's rest frame (g), for the putty and the stability guard. */
+    gravity: () => gooGravity(scene),
     /** True while the 3D view owns the page UI (its DOM boxes are transformed or re-parented). */
     get holdsLayout() {
       return !!config && config.phase !== 'off';

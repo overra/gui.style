@@ -1,8 +1,10 @@
 // Config mode. The view detaches from the scene camera and flies to a 3/4 orbit view of the scene: the page plane,
 // the camera's frustum and viewport rectangle (the reference plane), the goo, the light rig and two probe balls.
-// gpu/sceneView.ts ray-traces it into a full-viewport canvas that fades in over the flat page.
+// gpu/sceneView.ts ray-traces it into a full-viewport canvas that fades in over the flat page. The page stands
+// upright like a screen on a wall, and the view orbits around world up (screen-up) with a level horizon.
 //
-// Drag to orbit, right- or shift-drag to pan, wheel or pinch to zoom. Drag a light (its dot or its panel) or the
+// Drag to orbit, right- or shift-drag to pan, wheel or pinch to zoom (shift+wheel is kept for scrolling the
+// camera down a tall page, later). Drag a light (its dot or its panel) or the
 // page's blue depth handle. Press the goo to dent it from any angle: the press is found by casting the pointer's
 // ray into the goo's own frame, so it lands where the floating, sinking, tilting button really is. C or Esc flies
 // back to the camera.
@@ -25,25 +27,29 @@ import {
 import { sceneSdf, type Layout } from '../layout.ts';
 import { looks } from '../look.ts';
 import { params, restHeightCpu } from '../params.ts';
+import { addGravityFolder, addMaterialFolder } from '../materialPanel.ts';
 import type { SceneHostDeps } from './host.ts';
 import { createUiPlane, htmlInCanvasSupport } from './htmlInCanvas.ts';
 import {
   add,
   clamp,
+  cross,
   cssMatrixForPlane,
   DEG,
   dot,
-  fromSpherical,
+  fromElevationSwing,
   length,
   lerp3,
+  MAX_PITCH,
   normalize,
+  offAxis,
   orbitBasis,
   project,
   rayPlane,
   rayThrough,
   scale,
   sub,
-  toSpherical,
+  toElevationSwing,
   type CameraBasis,
   type OrbitPose,
   type Vec3,
@@ -53,7 +59,9 @@ import {
   airGap,
   cameraEye,
   cameraFov,
+  cameraOrigin,
   defaultScene,
+  describeGravity,
   distanceForFov,
   fromGooFrame,
   glassDepthTerms3d,
@@ -66,6 +74,7 @@ import {
   planeScale,
   referenceIrradiance,
   rigTarget,
+  sceneCameraPose,
   sizeFactor,
   toGooFrame,
   type Scene,
@@ -82,9 +91,10 @@ type Phase = 'off' | 'entering' | 'on' | 'exiting';
 type RGBA = [number, number, number, number];
 type Handle = { kind: 'light'; index: number } | { kind: 'depth' } | { kind: 'goo' };
 type Drag =
-  | { kind: 'orbit' | 'pan'; x0: number; y0: number; pose0: OrbitPose }
+  | { kind: 'orbit'; x0: number; y0: number; pose0: OrbitPose; center: Vec3 }
+  | { kind: 'pan'; x0: number; y0: number; pose0: OrbitPose }
   | { kind: 'light'; index: number; planePoint: Vec3; offset: Vec3 }
-  | { kind: 'depth'; y0: number; depth0: number; perPx: number }
+  | { kind: 'depth'; x0: number; y0: number; depth0: number; axis: [number, number] }
   | { kind: 'press'; id: number; z: number; x: number; y: number };
 
 const ENTER_S = 1.15;
@@ -102,6 +112,7 @@ const COLORS = {
   target: [1, 1, 1, 0.8] as RGBA,
   goo: [0.56, 1, 0.72, 0.9] as RGBA,
   gooSoft: [0.56, 1, 0.72, 0.5] as RGBA,
+  gravity: [0.78, 0.6, 1, 0.95] as RGBA,
 };
 
 /** The page's own background (html { background: var(--page) }), linear: what the camera sees past the page. */
@@ -127,22 +138,56 @@ const maxc = (c: Vec3) => Math.max(c[0], c[1], c[2]);
 const toSrgb = (c: number) => (c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055);
 const fromSrgb = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
 
-/**
- * Pose blend. At polar 0 (the straight-down camera) azimuth is a roll, so it waits until the view has tilted on
- * the way out, and finishes before the view is flat on the way back. Distance blends geometrically.
- */
+/** Pose blend: yaw the short way round (and wrapped), distance geometrically. */
 function lerpPose(a: OrbitPose, b: OrbitPose, t: number): OrbitPose {
-  const ta = b.polar < 1 ? smooth(0, 0.8, t) : a.polar < 1 ? smooth(0.15, 1, t) : t;
   return {
     pivot: lerp3(a.pivot, b.pivot, t),
-    polar: a.polar + (b.polar - a.polar) * t,
-    azimuth: a.azimuth + wrap180(b.azimuth - a.azimuth) * ta,
+    yaw: wrap180(a.yaw + wrap180(b.yaw - a.yaw) * t),
+    pitch: a.pitch + (b.pitch - a.pitch) * t,
     distance: a.distance * (b.distance / a.distance) ** t,
     fov: a.fov + (b.fov - a.fov) * t,
   };
 }
 
 const copyPose = (p: OrbitPose): OrbitPose => ({ ...p, pivot: [...p.pivot] });
+
+type Rect = { x0: number; y0: number; x1: number; y1: number };
+
+/**
+ * Fits `pts` into the screen rectangle `free` from `pose`'s angles: the smallest distance whose projected bounds
+ * fit, then a pan (along the view's right and up) that centres them, a few times over.
+ */
+function fitPose(pose: OrbitPose, pts: Vec3[], free: Rect, w: number, h: number): OrbitPose {
+  const bounds = (p: OrbitPose): Rect | null => {
+    const cam = orbitBasis(p);
+    const q = pts.map((v) => project(cam, w, h, v));
+    if (q.some((v) => v.z <= 1)) return null;
+    const xs = q.map((v) => v.x);
+    const ys = q.map((v) => v.y);
+    return { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) };
+  };
+  const p = copyPose(pose);
+  for (let pass = 0; pass < 4; pass++) {
+    let lo = 50;
+    let hi = 1e5;
+    for (let i = 0; i < 40; i++) {
+      const m = Math.sqrt(lo * hi);
+      const b = bounds({ ...p, distance: m });
+      if (b && b.x1 - b.x0 <= free.x1 - free.x0 && b.y1 - b.y0 <= free.y1 - free.y0) hi = m;
+      else lo = m;
+    }
+    p.distance = hi;
+    const b = bounds(p);
+    if (!b) break;
+    // The pan rule: k world px per screen px at the pivot's distance.
+    const k = (2 * p.distance * Math.tan((p.fov / 2) * DEG)) / h;
+    const c = orbitBasis(p);
+    const dx = (free.x0 + free.x1 - b.x0 - b.x1) / 2;
+    const dy = (free.y0 + free.y1 - b.y0 - b.y1) / 2;
+    p.pivot = add(p.pivot, add(scale(c.right, -dx * k), scale(c.up, dy * k)));
+  }
+  return p;
+}
 
 export function createConfigMode(deps: ConfigDeps) {
   const { scene } = deps;
@@ -159,7 +204,7 @@ export function createConfigMode(deps: ConfigDeps) {
   let phase: Phase = 'off';
   let wanted = false;
   let pose = cameraPose();
-  /** Where the user left the orbit view, to come back to it next time. */
+  /** Where the user left the orbit view (its pivot relative to cameraOrigin), to come back to it next time. */
   let userPose: OrbitPose | null = null;
   let anim: { from: OrbitPose; to: OrbitPose; t0: number; dur: number; done?: () => void } | null = null;
   let selected = 2;
@@ -197,9 +242,13 @@ export function createConfigMode(deps: ConfigDeps) {
 
   // ---- poses ----
   function cameraPose(): OrbitPose {
-    return { pivot: [0, 0, 0], polar: 0, azimuth: 0, distance: scene.camera.distance, fov: cameraFov(scene, window.innerHeight) };
+    return sceneCameraPose(scene, window.innerHeight);
   }
 
+  /**
+   * From the front-right, a little above: everything in frame (the camera, the page, every light and its panel,
+   * the probes), clear of the panel's column and the hint.
+   */
   function overviewPose(): OrbitPose {
     const w = window.innerWidth;
     const h = window.innerHeight;
@@ -207,27 +256,51 @@ export function createConfigMode(deps: ConfigDeps) {
     const s = planeScale(scene);
     const pts: Vec3[] = [cameraEye(scene), target];
     for (const sx of [-1, 1]) for (const sy of [-1, 1]) pts.push([(sx * w * s) / 2, (sy * h * s) / 2, -scene.page.depth]);
-    for (const l of scene.lights) pts.push(lightPosition(l, target));
+    for (const l of scene.lights) {
+      const p = lightPosition(l, target);
+      pts.push(p);
+      if (l.kind !== 'softbox') continue;
+      const [hx, hy] = physicalHalfSize(l);
+      const t = normalize(l.t);
+      const b = normalize(l.b);
+      for (const sx of [-1, 1]) for (const sy of [-1, 1]) pts.push(add(p, add(scale(t, sx * hx), scale(b, sy * hy))));
+    }
+    if (scene.probes) pts.push([w / 2 + 150, -134, 56], [w / 2 + 150, 134, 56], [w / 2 + 206, 0, 56]);
     const lo = [0, 1, 2].map((i) => Math.min(...pts.map((p) => p[i])));
     const hi = [0, 1, 2].map((i) => Math.max(...pts.map((p) => p[i])));
     const c: Vec3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
-    const r = Math.max(...pts.map((p) => length(sub(p, c))));
-    const fov = 34;
-    return { pivot: c, polar: 58, azimuth: 36, distance: (r / Math.sin((fov / 2) * DEG)) * 0.88, fov };
+    // The panel's column (left) and the hint (bottom) show on wide viewports; narrower, the panel starts closed.
+    const wide = w > 600;
+    const free = { x0: wide ? 326 : 24, y0: 24, x1: w - 24, y1: h - (wide ? 64 : 24) };
+    return fitPose({ pivot: c, yaw: 38, pitch: 16, distance: 3000, fov: 34 }, pts, free, w, h);
   }
 
+  /** The goo from the same side as the overview (so O ↔ F doesn't swing across the page), with the gap behind it. */
   function focusPose(): OrbitPose {
     const layout = deps.layout();
     const target = rigTarget(layout, scene);
     const s = layout?.shapes[0];
     const span = s ? Math.max(s.hx, s.hy) * 2 : 240;
-    // A floating goo is framed with the gap under it.
-    return { pivot: [target[0], target[1], target[2] * 0.5 + 4], polar: 56, azimuth: 30, distance: span * 2.2 + target[2], fov: 34 };
+    return { pivot: [target[0], target[1], target[2] * 0.5 + 4], yaw: 45, pitch: 30, distance: span * 2.2 + target[2], fov: 34 };
+  }
+
+  /**
+   * What a drag orbits around: the goo (the rig target), the scene's subject, while it is in view, so the page and
+   * the rig turn about it instead of swinging past; otherwise the view's own pivot. (The overview's pivot is the
+   * middle of everything, far in front of the page: the page would slide against the drag.)
+   */
+  function orbitCenter(cam: CameraBasis): Vec3 {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const target = rigTarget(deps.layout(), scene);
+    const p = project(cam, w, h, target);
+    return p.z > 1 && p.x >= 0 && p.y >= 0 && p.x <= w && p.y <= h ? target : [...pose.pivot];
   }
 
   function flyTo(to: OrbitPose) {
     if (phase !== 'on') return;
-    anim = { from: copyPose(pose), to, t0: deps.clock(), dur: reducedMotion.matches ? 0 : FLY_S };
+    // A drag held through the flight carries on from where it lands.
+    anim = { from: copyPose(pose), to, t0: deps.clock(), dur: reducedMotion.matches ? 0 : FLY_S, done: rebaseGestures };
     deps.wake();
   }
 
@@ -262,7 +335,7 @@ export function createConfigMode(deps: ConfigDeps) {
     pose = from;
     anim = {
       from,
-      to: userPose ?? overviewPose(),
+      to: userPose ? { ...copyPose(userPose), pivot: add(userPose.pivot, cameraOrigin(scene)) } : overviewPose(),
       t0: deps.clock() + fade,
       dur: reducedMotion.matches ? 0 : ENTER_S,
       done: () => {
@@ -274,13 +347,14 @@ export function createConfigMode(deps: ConfigDeps) {
     deps.wake();
   }
 
-  /** The fly-in overrides the camera every frame: a drag or pinch begun during it starts over from where it landed. */
+  /** A flight overrides the camera every frame: a drag or pinch held through it starts over from where it stopped. */
   function rebaseGestures() {
     const held = [...pointers.values()];
     if (drag && (drag.kind === 'orbit' || drag.kind === 'pan') && held[0]) {
       drag.x0 = held[0].x;
       drag.y0 = held[0].y;
       drag.pose0 = copyPose(pose);
+      if (drag.kind === 'orbit') drag.center = orbitCenter(orbitBasis(pose));
     }
     if (pinch && held.length >= 2) {
       pinch = { dist: Math.max(1, Math.hypot(held[0].x - held[1].x, held[0].y - held[1].y)), distance0: pose.distance };
@@ -291,7 +365,8 @@ export function createConfigMode(deps: ConfigDeps) {
     wanted = false;
     deps.onActiveChange(false);
     if (phase === 'off' || phase === 'exiting') return;
-    if (phase === 'on') userPose = copyPose(pose);
+    // Kept relative to the scene camera, so it comes back the same way after the camera moves down a page.
+    if (phase === 'on') userPose = { ...copyPose(pose), pivot: sub(pose.pivot, cameraOrigin(scene)) };
     endDrag();
     showChrome(false);
     phase = 'exiting';
@@ -421,7 +496,7 @@ export function createConfigMode(deps: ConfigDeps) {
       planeZ: -scene.page.depth,
       planeScale: planeScale(scene),
       pageLit: scene.page.lit,
-      gooTop: params.shape.plateau * 2.4 + 12,
+      gooTop: Math.max(params.shape.plateau * 2.4, (res?.settledTop ?? 0) + params.shape.plateau * 1.4) + 12,
       // Beside the viewport, on the reference plane: outside the camera's frustum, so normal mode never sees them.
       probeA: probes ? d.vec4f(w / 2 + 150, -78, 56, 56) : d.vec4f(),
       probeB: probes ? d.vec4f(w / 2 + 150, 78, 56, 56) : d.vec4f(),
@@ -442,14 +517,24 @@ export function createConfigMode(deps: ConfigDeps) {
       ...glassLights(scene, theme),
       ...glassDepthTerms3d(scene, look, deps.pose()),
     };
-    return { scene: sceneParams, glass, ...gizmos(layout, target, theme) };
+    return { scene: sceneParams, glass, ...gizmos(cam, layout, target, theme) };
   }
 
-  /** 0 when looking straight through the scene camera, 1 once the view has tilted away (see SceneParams.overlay). */
-  const overlayAmount = () => smooth(0.5, 12, pose.polar);
+  /** 0 when looking straight through the scene camera, 1 once the view has turned away (see SceneParams.overlay). */
+  const overlayAmount = () => smooth(0.5, 12, offAxis(pose));
 
   // ---- gizmos ----
-  const depthHandle = (): Vec3 => [0, (window.innerHeight / 2) * planeScale(scene), -scene.page.depth];
+  /** Where the gravity arrow from the rig target ends: 100 px per g. */
+  const gravityTip = (target: Vec3): Vec3 => add(target, scale(scene.gravity, 100));
+
+  /** What the putty does under gravity, from the sag check ("holds", "sags", …). */
+  const materialState = () => (goo ? { regime: goo.sag.regime, phase: goo.settlePhase } : null);
+
+  /** The depth handle at page depth g: the page's bottom-centre (a page that fills the view grows with depth). */
+  const depthHandle = (g = scene.page.depth): Vec3 => {
+    const D = scene.camera.distance;
+    return [0, (window.innerHeight / 2) * (scene.page.fill ? (D + g) / D : 1), -g];
+  };
 
   function lightTint(l: SceneLight, theme: 'light' | 'dark', alpha: number): RGBA {
     const r = l.radiance[theme];
@@ -457,7 +542,7 @@ export function createConfigMode(deps: ConfigDeps) {
     return [toSrgb(0.35 + (0.65 * r[0]) / m), toSrgb(0.35 + (0.65 * r[1]) / m), toSrgb(0.35 + (0.65 * r[2]) / m), alpha];
   }
 
-  function gizmos(layout: Layout, target: Vec3, theme: 'light' | 'dark') {
+  function gizmos(cam: CameraBasis, layout: Layout, target: Vec3, theme: 'light' | 'dark') {
     const segments: SegmentInput[] = [];
     const dots: DotInput[] = [];
     const line = (a: Vec3, b: Vec3, color: RGBA, width = 1.5, dash = 0) =>
@@ -479,26 +564,33 @@ export function createConfigMode(deps: ConfigDeps) {
     const g = scene.page.depth;
     const s = planeScale(scene);
     const eye = cameraEye(scene);
+    const origin = cameraOrigin(scene);
+    const fromCamera = (pts: Vec3[]) => pts.map((p) => add(origin, p));
 
     // The camera's frustum: eye → the viewport rectangle on the reference plane → on to the page plane's depth.
-    const ref = rect(w / 2, h / 2, 0);
+    const ref = fromCamera(rect(w / 2, h / 2, 0));
     const k = (D + g) / D;
-    const far = rect((w / 2) * k, (h / 2) * k, -g);
+    const far = fromCamera(rect((w / 2) * k, (h / 2) * k, -g));
     for (let i = 0; i < 4; i++) {
       line(eye, ref[i], COLORS.cameraSoft, 1.25);
       if (g > 0) line(ref[i], far[i], COLORS.cameraSoft, 1, 18);
     }
     loop(ref, COLORS.camera, 2.5);
     if (g > 0 && !scene.page.fill) loop(far, COLORS.cameraSoft, 1, 18);
-    // A small camera body with an "up" tick (screen up is −y).
+    // A small camera body with an "up" tick (screen up, −y, is world up).
     const bodyZ = D - 90;
     const kb = 90 / D;
-    const body = rect((w / 2) * kb, (h / 2) * kb, bodyZ);
+    const body = fromCamera(rect((w / 2) * kb, (h / 2) * kb, bodyZ));
     body.forEach((p) => line(eye, p, COLORS.camera, 1.75));
     loop(body, COLORS.camera, 1.75);
     const upY = (-h / 2) * kb;
-    line([-(w / 2) * kb * 0.35, upY, bodyZ], [0, upY - 22, bodyZ], COLORS.camera, 1.75);
-    line([0, upY - 22, bodyZ], [(w / 2) * kb * 0.35, upY, bodyZ], COLORS.camera, 1.75);
+    const [tl, tip, tr] = fromCamera([
+      [-(w / 2) * kb * 0.35, upY, bodyZ],
+      [0, upY - 22, bodyZ],
+      [(w / 2) * kb * 0.35, upY, bodyZ],
+    ]);
+    line(tl, tip, COLORS.camera, 1.75);
+    line(tip, tr, COLORS.camera, 1.75);
 
     // The page plane and its depth handle.
     loop(rect((w / 2) * s, (h / 2) * s, -g), COLORS.page, 1.75);
@@ -507,6 +599,20 @@ export function createConfigMode(deps: ConfigDeps) {
     if (g > 0) line(hd, [0, h / 2, 0], COLORS.pageSoft, 1, 10);
     disc(hd, hot ? 8 : 6.5, COLORS.page, hot ? 0 : 2.5);
 
+    // Gravity: an arrow from the rig target, 100 px per g, its head turned toward the view.
+    const gv = scene.gravity;
+    const gs = length(gv);
+    if (gs > 0.005) {
+      const tip = gravityTip(target);
+      const dir = scale(gv, 1 / gs);
+      const across = cross(dir, cam.fwd);
+      const side = normalize(length(across) > 1e-3 ? across : cross(dir, cam.up));
+      const back = sub(tip, scale(dir, 14));
+      line(target, tip, COLORS.gravity, 2);
+      line(tip, add(back, scale(side, 7)), COLORS.gravity, 2);
+      line(tip, sub(back, scale(side, 7)), COLORS.gravity, 2);
+    }
+
     // The rig target (the goo center).
     const tc = 14;
     line(add(target, [-tc, 0, 0]), add(target, [tc, 0, 0]), COLORS.target, 1.25);
@@ -514,7 +620,7 @@ export function createConfigMode(deps: ConfigDeps) {
     line(target, add(target, [0, 0, tc * 2]), COLORS.target, 1.25);
 
     // A floating goo: its base outline (in its own frame, so it sinks and tilts with presses), the same outline
-    // dropped straight onto the page, and drop lines between them, so the air gap reads at a glance.
+    // projected straight back onto the page, and lines between them, so the air gap reads at a glance.
     const s0 = layout.shapes[0];
     const pose = deps.pose();
     if (s0 && airGap(scene, pose) > 0.5) {
@@ -527,10 +633,10 @@ export function createConfigMode(deps: ConfigDeps) {
           base.push(fromGooFrame(frame, [s0.cx + sx * (s0.hx - r) + Math.cos(a) * r, s0.cy + sy * (s0.hy - r) + Math.sin(a) * r, 0]));
         }
       }
-      const dropped = base.map((p): Vec3 => [p[0], p[1], -g]);
+      const onPage = base.map((p): Vec3 => [p[0], p[1], -g]);
       loop(base, COLORS.goo, 1.5);
-      loop(dropped, COLORS.gooSoft, 1, 10);
-      for (let i = 0; i < base.length; i += 6) line(base[i], dropped[i], COLORS.gooSoft, 1, 8);
+      loop(onPage, COLORS.gooSoft, 1, 10);
+      for (let i = 0; i < base.length; i += 6) line(base[i], onPage[i], COLORS.gooSoft, 1, 8);
     }
 
     // Lights: aim line, outline, handle.
@@ -567,40 +673,61 @@ export function createConfigMode(deps: ConfigDeps) {
   function placeDom(cam: CameraBasis, layout: Layout) {
     const w = layout.viewportW;
     const h = layout.viewportH;
-    if (uiMode === 'css') deps.stage.style.transform = cssMatrixForPlane(cam, w, h, stageBox.x, stageBox.y);
+    if (uiMode === 'css') {
+      deps.stage.style.transform = cssMatrixForPlane(cam, w, h, stageBox.x, stageBox.y);
+      // From behind the reference plane CSS would draw the stage mirrored, over the page's back (its back-face test
+      // never fires for this matrix). Opacity keeps it in the accessibility tree.
+      deps.stage.style.opacity = cam.eye[2] > 0 ? '' : '0';
+    }
     labelLayer.style.opacity = String(overlayAmount());
     const target = rigTarget(layout, scene);
     const D = scene.camera.distance;
     const s = planeScale(scene);
     const gap = airGap(scene, deps.pose());
-    const items: { id: string; text: string; at: Vec3; kind?: string; selected?: boolean }[] = [
+    const origin = cameraOrigin(scene);
+    // Each label sits just above its object on screen (`end`: it ends there instead of centring on it).
+    const items: { id: string; text: string; at: Vec3; kind?: string; selected?: boolean; end?: boolean }[] = [
       {
         id: 'goo',
-        text: gap > 0.5 ? `Goo · ${Math.round(gap)} px above the page` : 'Goo · resting on the page',
+        text: gap > 0.5 ? `Goo · ${Math.round(gap)} px in front of the page` : 'Goo · on the page',
         at: add(target, [0, -(layout.shapes[0]?.hy ?? 40) - 6, params.shape.plateau]),
         kind: 'goo',
       },
       {
         id: 'camera',
         text: `Camera · fov ${cameraFov(scene, h).toFixed(1)}° · eye ${Math.round(D)} px`,
-        at: [0, 0, D + 30],
+        // Above the camera body's up tick.
+        at: add(origin, [0, -(h / 2) * (90 / D) - 34, D - 90]),
         kind: 'camera',
       },
-      { id: 'viewport', text: `Viewport = reference plane · ${Math.round(w)}×${Math.round(h)} CSS px`, at: [-w / 2, -h / 2, 0], kind: 'camera' },
+      {
+        id: 'viewport',
+        text: `Viewport = reference plane · ${Math.round(w)}×${Math.round(h)} CSS px`,
+        at: add(origin, [-w / 2, -h / 2, 0]),
+        kind: 'camera',
+      },
       {
         id: 'page',
         text: `Page plane · ${Math.round(scene.page.depth)} px back · ${scene.page.fill ? `scaled ${s.toFixed(2)}×` : 'unscaled'}`,
-        at: [(w / 2) * s, (h / 2) * s, -scene.page.depth],
+        // The top-right corner (the viewport's label has the top-left one), the label ending there.
+        at: [(w / 2) * s, -(h / 2) * s, -scene.page.depth],
         kind: 'page',
+        end: true,
       },
-      ...scene.lights.map((l, i) => ({
-        id: `light${i}`,
-        text: l.name,
-        at: add(lightPosition(l, target), [0, 0, physicalHalfSize(l)[1] + 16]),
-        selected: i === selected,
-      })),
+      // At the light's dot; scene.css lifts it a fixed distance on screen.
+      ...scene.lights.map((l, i) => ({ id: `light${i}`, text: l.name, at: lightPosition(l, target), kind: 'light', selected: i === selected })),
     ];
-    if (scene.probes) items.push({ id: 'probes', text: 'Probe balls', at: [w / 2 + 150, 0, 150] });
+    if (length(scene.gravity) > 0.005) {
+      const state = materialState();
+      items.push({
+        id: 'gravity',
+        text: `Gravity · ${describeGravity(scene.gravity)}${state ? ` · ${state.regime}` : ''}`,
+        // Its tip; scene.css hangs the label below it.
+        at: gravityTip(target),
+        kind: 'gravity',
+      });
+    }
+    if (scene.probes) items.push({ id: 'probes', text: 'Probe balls', at: [w / 2 + 150, -144, 56] });
     const seen = new Set<string>();
     for (const it of items) {
       seen.add(it.id);
@@ -617,7 +744,11 @@ export function createConfigMode(deps: ConfigDeps) {
       const p = project(cam, w, h, it.at);
       const visible = p.z > 1 && p.x > -200 && p.x < w + 200 && p.y > -50 && p.y < h + 50;
       el.style.display = visible ? '' : 'none';
-      if (visible) el.style.transform = `translate(${p.x.toFixed(1)}px, ${p.y.toFixed(1)}px) translate(-50%, -100%)`;
+      if (visible) {
+        el.style.transform = `translate(${p.x.toFixed(1)}px, ${p.y.toFixed(1)}px) translate(${it.end ? -100 : -50}%, -100%)`;
+        // Behind the page, as seen from here: the label stays, faded.
+        el.style.opacity = behindPage(cam.eye, it.at) ? '0.35' : '';
+      }
     }
     for (const [id, el] of labels) if (!seen.has(id)) el.style.display = 'none';
   }
@@ -652,6 +783,7 @@ export function createConfigMode(deps: ConfigDeps) {
     uiMode = 'css';
     uiReady = false;
     deps.stage.style.transform = '';
+    deps.stage.style.opacity = '';
     const r = deps.stage.getBoundingClientRect();
     stageBox = { x: r.left, y: r.top };
   }
@@ -659,11 +791,26 @@ export function createConfigMode(deps: ConfigDeps) {
   function uiEnd() {
     if (uiMode === 'html') uiPlane?.detach();
     deps.stage.style.transform = '';
+    deps.stage.style.opacity = '';
     uiMode = 'none';
     uiReady = false;
   }
 
   // ---- picking ----
+  /**
+   * The page plane lies between the eye and p, inside the page's rectangle: it hides p. A point on the page's
+   * front face (a goo resting on it, a label) is hidden only from behind.
+   */
+  function behindPage(eye: Vec3, p: Vec3): boolean {
+    const z0 = -scene.page.depth;
+    if (eye[2] >= z0 === p[2] >= z0) return false;
+    const t = (z0 - eye[2]) / (p[2] - eye[2]);
+    const s = planeScale(scene);
+    const x = eye[0] + (p[0] - eye[0]) * t;
+    const y = eye[1] + (p[1] - eye[1]) * t;
+    return Math.abs(x) <= (window.innerWidth / 2) * s && Math.abs(y) <= (window.innerHeight / 2) * s;
+  }
+
   /** The pointer's ray in the goo's own frame, which floats, sinks and tilts: origin and direction in goo units. */
   function gooRay(cam: CameraBasis, x: number, y: number, layout: Layout) {
     const r = rayThrough(cam, layout.viewportW, layout.viewportH, x, y);
@@ -678,21 +825,36 @@ export function createConfigMode(deps: ConfigDeps) {
     return t > 0 ? [o[0] + v[0] * t, o[1] + v[1] * t] : null;
   }
 
-  /** Where the pointer's ray first meets the resting putty: goo space and height above its base, or null. */
+  /**
+   * Where the pointer's ray first meets the resting putty: goo space and height above its base, or null. Not
+   * through the page: from behind it, the march would come up through the goo's base.
+   */
   function gooHit(cam: CameraBasis, x: number, y: number) {
     const layout = deps.layout();
     if (!layout) return null;
+    const hit = gooMarch(cam, x, y, layout);
+    if (!hit) return null;
+    // Tested on the putty's side of its base: a hit taken on the base itself (the march's first sample from behind,
+    // or its last step past the base) would sit on, or just past, a page at depth 0.
+    const world = fromGooFrame(gooFrame(scene, layout, deps.pose()), [hit.x, hit.y, Math.max(hit.z, 0)]);
+    return behindPage(cam.eye, world) ? null : hit;
+  }
+
+  /** The march itself, in the goo's frame: its first hit with the resting putty (goo space, height), or null. */
+  function gooMarch(cam: CameraBasis, x: number, y: number, layout: Layout) {
     const { o, v } = gooRay(cam, x, y, layout);
     if (Math.abs(v[2]) < 1e-9) return null;
     // March the slab between the base and a little above the plateau, 1.5 world px at a time.
-    const top = params.shape.plateau * 1.8;
+    const top = Math.max(params.shape.plateau * 1.8, (goo?.sceneResources()?.settledTop ?? 0) + 4);
     const tTop = (top - o[2]) / v[2];
     const tBase = -o[2] / v[2];
     const tEnd = Math.max(tTop, tBase);
     for (let i = 0, t = Math.max(Math.min(tTop, tBase), 0); i < 900 && t <= tEnd + 1.5; i++, t += 1.5) {
       const p = add(o, scale(v, t));
       if (p[0] < 0 || p[1] < 0 || p[0] > layout.width || p[1] > layout.height) continue;
-      const height = restHeightCpu(sceneSdf(layout.shapes, p[0], p[1], params.shape.blend));
+      // Molded, plus a settled sag inside the resting outline (its lip past it isn't drawn, so it isn't hit either).
+      const sd = sceneSdf(layout.shapes, p[0], p[1], params.shape.blend);
+      const height = restHeightCpu(sd) + (sd > 0 ? 0 : (goo?.settledAt(p[0], p[1]) ?? 0));
       if (height > 0.5 && p[2] <= height) return { x: p[0], y: p[1], z: p[2] };
     }
     return null;
@@ -714,13 +876,15 @@ export function createConfigMode(deps: ConfigDeps) {
         const b = dot(oc, r.d);
         const disc = b * b - (dot(oc, oc) - (hx * 2) ** 2);
         const t = disc > 0 ? -b - Math.sqrt(disc) : Infinity;
-        if (t > 0 && t < bestT) [best, bestT] = [i, t];
+        if (t > 0 && t < bestT && !behindPage(r.o, add(r.o, scale(r.d, t)))) [best, bestT] = [i, t];
       } else {
         const n = normalize(l.dir);
         const t = rayPlane(r.o, r.d, p, n);
         if (!Number.isFinite(t) || t >= bestT) return;
-        const q = sub(add(r.o, scale(r.d, t)), p);
-        if (Math.abs(dot(q, normalize(l.t))) <= hx && Math.abs(dot(q, normalize(l.b))) <= hy) [best, bestT] = [i, t];
+        const hit = add(r.o, scale(r.d, t));
+        const q = sub(hit, p);
+        const inside = Math.abs(dot(q, normalize(l.t))) <= hx && Math.abs(dot(q, normalize(l.b))) <= hy;
+        if (inside && !behindPage(r.o, hit)) [best, bestT] = [i, t];
       }
     });
     return best;
@@ -733,9 +897,10 @@ export function createConfigMode(deps: ConfigDeps) {
     let best: Handle | null = null;
     let bestD = 18;
     scene.lights.forEach((l, i) => {
-      const p = project(cam, w, h, lightPosition(l, target));
+      const at = lightPosition(l, target);
+      const p = project(cam, w, h, at);
       const dd = Math.hypot(p.x - x, p.y - y);
-      if (p.z > 1 && dd < bestD) [best, bestD] = [{ kind: 'light', index: i }, dd];
+      if (p.z > 1 && dd < bestD && !behindPage(cam.eye, at)) [best, bestD] = [{ kind: 'light', index: i }, dd];
     });
     const ph = project(cam, w, h, depthHandle());
     if (ph.z > 1 && Math.hypot(ph.x - x, ph.y - y) < bestD) best = { kind: 'depth' };
@@ -790,10 +955,10 @@ export function createConfigMode(deps: ConfigDeps) {
       const t = rayPlane(r.o, r.d, p, cam.fwd);
       drag = { kind: 'light', index: selected, planePoint: p, offset: Number.isFinite(t) ? sub(p, add(r.o, scale(r.d, t))) : [0, 0, 0] };
     } else if (handle?.kind === 'depth') {
+      // Measured along the handle's own screen motion as the page goes 100 px deeper.
       const a = project(cam, w, h, depthHandle());
-      const b = project(cam, w, h, add(depthHandle(), [0, 0, 100]));
-      const dy = a.y - b.y;
-      drag = { kind: 'depth', y0: y, depth0: scene.page.depth, perPx: Math.abs(dy) > 2 ? 100 / dy : 2 };
+      const b = project(cam, w, h, depthHandle(scene.page.depth + 100));
+      drag = { kind: 'depth', x0: x, y0: y, depth0: scene.page.depth, axis: [b.x - a.x, b.y - a.y] };
     } else if (handle?.kind === 'goo' && !e.shiftKey) {
       const hit = gooHit(cam, x, y);
       if (hit && goo) {
@@ -808,7 +973,10 @@ export function createConfigMode(deps: ConfigDeps) {
         if (id >= 0) drag = { kind: 'press', id, z: hit.z, x, y };
       }
     }
-    drag ??= { kind: e.button !== 0 || e.shiftKey ? 'pan' : 'orbit', x0: x, y0: y, pose0: copyPose(pose) };
+    drag ??=
+      e.button !== 0 || e.shiftKey
+        ? { kind: 'pan', x0: x, y0: y, pose0: copyPose(pose) }
+        : { kind: 'orbit', x0: x, y0: y, pose0: copyPose(pose), center: orbitCenter(cam) };
     canvas.classList.add('is-dragging');
     deps.wake();
   });
@@ -838,10 +1006,22 @@ export function createConfigMode(deps: ConfigDeps) {
       return;
     }
     switch (drag.kind) {
-      case 'orbit':
-        pose.azimuth = drag.pose0.azimuth - (x - drag.x0) * 0.3;
-        pose.polar = clamp(drag.pose0.polar - (y - drag.y0) * 0.3, 0, 88);
+      case 'orbit': {
+        // Grab the scene, as in most 3D tools: drag right and it turns right (the eye orbits to its left); drag down
+        // and its top tips toward you (the eye rises). Yaw is unbounded: behind the wall the page shows its back.
+        const yaw = wrap180(drag.pose0.yaw - (x - drag.x0) * 0.3);
+        const pitch = clamp(drag.pose0.pitch + (y - drag.y0) * 0.3, -MAX_PITCH, MAX_PITCH);
+        // It turns about the orbit center (orbitCenter), which then stays put on screen: the pivot is carried
+        // around it by the rotation that takes the start view's frame to the new one.
+        const b0 = orbitBasis(drag.pose0);
+        const b1 = orbitBasis({ ...drag.pose0, yaw, pitch });
+        const r = sub(drag.pose0.pivot, drag.center);
+        const turned = add(add(scale(b1.right, dot(b0.right, r)), scale(b1.up, dot(b0.up, r))), scale(b1.fwd, dot(b0.fwd, r)));
+        pose.pivot = add(drag.center, turned);
+        pose.yaw = yaw;
+        pose.pitch = pitch;
         break;
+      }
       case 'pan': {
         const k = (2 * drag.pose0.distance * Math.tan((drag.pose0.fov / 2) * DEG)) / h;
         const c0 = orbitBasis(drag.pose0);
@@ -854,10 +1034,16 @@ export function createConfigMode(deps: ConfigDeps) {
         if (Number.isFinite(t)) moveLight(scene.lights[drag.index], add(add(r.o, scale(r.d, t)), drag.offset), e.altKey);
         break;
       }
-      case 'depth':
-        scene.page.depth = clamp(drag.depth0 + (y - drag.y0) * drag.perPx, 0, 4000);
+      case 'depth': {
+        // The pointer's motion along that axis, ignoring motion across it; seen side-on, 2 px of depth per px.
+        const [sx, sy] = drag.axis;
+        const s2 = sx * sx + sy * sy;
+        const dx = x - drag.x0;
+        const dy = y - drag.y0;
+        scene.page.depth = clamp(drag.depth0 + (s2 > 4 ? (100 * (dx * sx + dy * sy)) / s2 : 2 * dy), 0, 4000);
         deps.sceneChanged();
         break;
+      }
       case 'press': {
         // The finger slides across the putty by the pointer's movement, measured at the height it pressed in and in
         // the goo's frame as it is now. A still pointer leaves the finger where it is while the cushion sinks and
@@ -892,9 +1078,14 @@ export function createConfigMode(deps: ConfigDeps) {
     (e) => {
       if (phase !== 'on') return;
       e.preventDefault();
+      // Kept for scrolling the scene camera down a tall page (a shifted mouse wheel arrives as deltaX).
+      if (e.shiftKey) return;
+      // Zooming cuts a flight short; a drag held through it starts over from here.
+      const cut = !!anim;
       anim = null;
       const step = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
       pose.distance = clamp(pose.distance * Math.exp(step * 0.0015), 40, 40000);
+      if (cut) rebaseGestures();
       deps.wake();
     },
     { passive: false },
@@ -933,7 +1124,7 @@ export function createConfigMode(deps: ConfigDeps) {
     };
     const cam = gui.addFolder('Camera');
     cam.add(camera, 'fov', 8, 100, 0.1).name('field of view (°)').listen();
-    cam.add(camera, 'eye').name('eye height (px)').disable().listen();
+    cam.add(camera, 'eye').name('eye distance (px)').disable().listen();
 
     const page = gui.addFolder('Page plane');
     page.add(scene.page, 'depth', 0, 3000, 1).name('depth behind (px)').listen();
@@ -942,11 +1133,16 @@ export function createConfigMode(deps: ConfigDeps) {
 
     // The same values as the "Levitation" folder of the tuning panel (?tune).
     const float = gui.addFolder('Levitation');
-    float.add(scene.goo, 'hover', 0, MAX_HOVER, 1).name('hover height (px)').listen();
+    float.add(scene.goo, 'hover', 0, MAX_HOVER, 1).name('hover distance (px)').listen();
     float.add(params.levitation, 'travel', 0, 30, 0.5).name('press travel (px)').listen();
     float.add(params.levitation, 'stiffness', 1, 15, 0.1).name('stiffness (Hz)').listen();
     float.add(params.levitation, 'damping', 0.05, 1.2, 0.01).name('damping (bouncy → still)').listen();
     float.add(params.levitation, 'tilt', 0, 1, 0.01).name('tilt toward the press').listen();
+
+    // The same values as the tuning panel's Gravity and Material folders.
+    const hooks = { gravity: scene.gravity, sag: materialState };
+    for (const c of addGravityFolder(gui, hooks).live) c.listen();
+    for (const c of addMaterialFolder(gui, hooks).live) c.listen();
 
     const L = () => scene.lights[selected];
     const light = {
@@ -957,17 +1153,19 @@ export function createConfigMode(deps: ConfigDeps) {
         selected = Number(i);
         deps.wake();
       },
-      get fromOverhead() {
-        return toSpherical(L().dir).polar;
+      // World-up angles; the getters are only polled, so opening the panel never rewrites a light. aimLight keeps
+      // it within 85° of the page's axis, so a corner like (75°, 75°) reads back a little inside it.
+      get elevation() {
+        return toElevationSwing(L().dir).elevation;
       },
-      set fromOverhead(p: number) {
-        aimLight(L(), fromSpherical(p, toSpherical(L().dir).azimuth));
+      set elevation(e: number) {
+        aimLight(L(), fromElevationSwing(e, toElevationSwing(L().dir).swing));
       },
-      get azimuth() {
-        return toSpherical(L().dir).azimuth;
+      get swing() {
+        return toElevationSwing(L().dir).swing;
       },
-      set azimuth(a: number) {
-        aimLight(L(), fromSpherical(toSpherical(L().dir).polar, a));
+      set swing(s: number) {
+        aimLight(L(), fromElevationSwing(toElevationSwing(L().dir).elevation, s));
       },
       get distance() {
         return L().distance;
@@ -999,8 +1197,8 @@ export function createConfigMode(deps: ConfigDeps) {
     };
     const lights = gui.addFolder('Lights');
     lights.add(light, 'which', Object.fromEntries(scene.lights.map((l, i) => [l.name, i]))).name('light').listen();
-    lights.add(light, 'fromOverhead', 1, 85, 0.5).name('angle from overhead (°)').listen();
-    lights.add(light, 'azimuth', -180, 180, 0.5).name('azimuth (°)').listen();
+    lights.add(light, 'elevation', -85, 85, 0.5).name('elevation (°)').listen();
+    lights.add(light, 'swing', -85, 85, 0.5).name('swing (° right)').listen();
     lights.add(light, 'distance', 150, 6000, 1).name('distance (px)').listen();
     lights.add(light, 'brightness', 0, 4, 0.01).name('brightness (× default)').listen();
     lights.addColor(light, 'color').name('color').listen();
@@ -1043,6 +1241,8 @@ export function createConfigMode(deps: ConfigDeps) {
     Object.assign(scene.goo, fresh.goo);
     scene.lights.forEach((l, i) => Object.assign(l, fresh.lights[i]));
     scene.probes = fresh.probes;
+    // In place: the panels hold this array.
+    scene.gravity.splice(0, 3, ...fresh.gravity);
     deps.sceneChanged();
   }
 
@@ -1067,9 +1267,30 @@ export function createConfigMode(deps: ConfigDeps) {
         return copyPose(pose);
       },
       setPose(p: Partial<OrbitPose>) {
-        pose = { ...copyPose(pose), ...p };
+        // A flight cut short still finishes its phase change (or the view would stay 'entering').
+        const done = anim?.done;
         anim = null;
+        pose = { ...copyPose(pose), ...p };
+        done?.();
         deps.wake();
+      },
+      get basis() {
+        return orbitBasis(pose);
+      },
+      /** World → viewport CSS px from the current view. */
+      project: (p: Vec3) => project(orbitBasis(pose), window.innerWidth, window.innerHeight, p),
+      get target() {
+        return rigTarget(deps.layout(), scene);
+      },
+      depthHandle,
+      lightAngles(i: number) {
+        const dir = scene.lights[i].dir;
+        const n = normalize(dir);
+        return { ...toElevationSwing(dir), offAxis: Math.acos(clamp(n[2], -1, 1)) / DEG };
+      },
+      aimLight(i: number, elevation: number, swing: number) {
+        aimLight(scene.lights[i], fromElevationSwing(elevation, swing));
+        deps.sceneChanged();
       },
       flyTo,
       overviewPose,

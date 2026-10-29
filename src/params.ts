@@ -44,10 +44,18 @@ export const params = {
     contact: 20000,
   },
 
-  /** Plastic layer: volume-conserving viscoplastic flow (imprint, raised rim). */
+  /**
+   * Plastic layer: volume-conserving viscoplastic flow (imprint, raised rim). What holds the putty on the page is
+   * adhesion (`pin`, `dewet`), cohesion (`yieldHead`, `memory`) and surface tension; gravity is a scene setting
+   * (scene.gravity) that pulls on it through `weight`.
+   */
   plastic: {
-    gravity: 1,
-    /** Capillary smoothing (cell²). */
+    /**
+     * Shape memory (cohesion): restoring head per px of deviation from the molded shape, the putty network's
+     * backstress. It used to be called `gravity` and keeps its value.
+     */
+    memory: 1,
+    /** Capillary smoothing (cell²): surface tension. */
     surfaceTension: 0.35,
     /** Penalty stiffness of the shallower "plastic" finger, and the share of the dent that sets plastically. */
     contact: 20,
@@ -59,8 +67,23 @@ export const params = {
     yieldHead: 2.5,
     /** Creep conductance (cell²/s): slow leveling flow. */
     creep: 0.8,
-    /** Extra restoring head outside the resting footprint (dewetting). */
+    /** Extra restoring head outside the resting footprint: the bare page doesn't wet, so spills retract. */
     dewet: 12,
+    /** Adhesion: head (px) a face between putty and bare page holds before the contact line creeps (was 0). */
+    pin: 0.2,
+    /** Weight: head (px) per px of travel per g. Density × scale ÷ the stress unit; small, as for a real putty. */
+    weight: 0.05,
+  },
+
+  /**
+   * Material macros, 0..1 with 0.5 = the base values above (see feel.ts): adhesion (slips → sticks), cohesion
+   * (runny → holds its shape), surface tension (wrinkly → smooth), density (light → heavy).
+   */
+  material: {
+    adhesion: 0.5,
+    cohesion: 0.5,
+    surfaceTension: 0.5,
+    density: 0.5,
   },
 
   /** Self-healing: the putty remembers its resting shape and returns to it once left alone. */
@@ -107,9 +130,9 @@ export const params = {
   },
 
   /**
-   * Levitation: when the button floats above the page (scene.goo.hover > 0, or a pushed-back page), it rides on an
-   * air cushion. A press pushes the whole button toward the page and tilts it toward an off-centre finger; let go
-   * and it springs back. The squish and the fingerprints ride on top.
+   * Levitation: when the button floats in front of the page (scene.goo.hover > 0, or a pushed-back page), it rides
+   * on an air cushion. A press pushes the whole button toward the page and tilts it toward an off-centre finger;
+   * let go and it springs back. The squish and the fingerprints ride on top.
    */
   levitation: {
     /** How far a full press pushes the button toward the page (CSS px; never further than the air gap allows). */

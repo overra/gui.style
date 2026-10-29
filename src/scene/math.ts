@@ -1,6 +1,7 @@
 // Tiny 3D vector helpers for the scene model (CPU side). World frame = the existing screen frame: x right,
-// y down, z toward the viewer (left-handed), in CSS px. Cameras are explicit bases (right, up, forward) rather
-// than matrices, so the shaders, picking and the CSS 3D fallback all share one projection.
+// y down, z toward the viewer (left-handed), in CSS px. The page stands upright like a screen on a wall: world up
+// is screen-up (−y), and the page's own axis (z) is horizontal. Cameras are explicit bases (right, up, forward)
+// rather than matrices, so the shaders, picking and the CSS 3D fallback all share one projection.
 
 export type Vec3 = [number, number, number];
 
@@ -24,7 +25,15 @@ export const cross = (a: Vec3, b: Vec3): Vec3 => [
 export const DEG = Math.PI / 180;
 export const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
-/** Unit direction from a polar angle off +z and a screen azimuth atan2(y_down, x), both in degrees. */
+/** World up (screen-up), along the wall (the page's right), and out of the page toward the viewer. */
+export const WORLD_UP: Vec3 = [0, -1, 0];
+export const WORLD_RIGHT: Vec3 = [1, 0, 0];
+export const WORLD_FRONT: Vec3 = [0, 0, 1];
+
+/**
+ * Unit direction around the page's axis: a polar angle off +z (out of the page) and a screen azimuth
+ * atan2(y_down, x), both in degrees.
+ */
 export function fromSpherical(polarDeg: number, azDeg: number): Vec3 {
   const be = polarDeg * DEG;
   const az = azDeg * DEG;
@@ -45,36 +54,59 @@ export interface CameraBasis {
   tanY: number;
 }
 
+/** Steepest the orbit view looks down on (or up at) the page, degrees. */
+export const MAX_PITCH = 88;
+
 /**
- * An orbit pose around `pivot`. polar 0 looks straight down −z at the page with screen-up = −y (exactly the
- * scene camera); raising it tilts the camera toward +y (the bottom of the page), then azimuth spins the rig
- * about the page normal. The screen-up vector turns toward +z as it tilts, so the page reads as a floor.
+ * An orbit pose around `pivot`: a turntable around world up. yaw 0, pitch 0 looks along −z at the page with
+ * screen-up −y (exactly the scene camera). yaw turns the eye around world up (+ = toward +x, the page's right);
+ * pitch raises it (+ = above the pivot, looking down). The horizon stays level: `right` is always horizontal.
  */
 export interface OrbitPose {
   pivot: Vec3;
-  polar: number;
-  azimuth: number;
+  yaw: number;
+  pitch: number;
   distance: number;
   /** Vertical field of view, degrees. */
   fov: number;
 }
 
 export function orbitBasis(p: OrbitPose): CameraBasis {
-  const th = p.polar * DEG;
-  const ph = p.azimuth * DEG;
-  const ct = Math.cos(th);
-  const st = Math.sin(th);
-  const cp = Math.cos(ph);
-  const sp = Math.sin(ph);
-  // R = Rz(φ)·Rx(θ), applied to the scene camera's basis: right (1,0,0), up (0,−1,0), back (0,0,1).
-  const rz = (v: Vec3): Vec3 => [v[0] * cp - v[1] * sp, v[0] * sp + v[1] * cp, v[2]];
-  const back = rz([0, st, ct]);
+  const cy = Math.cos(p.yaw * DEG);
+  const sy = Math.sin(p.yaw * DEG);
+  const cp = Math.cos(p.pitch * DEG);
+  const sp = Math.sin(p.pitch * DEG);
+  // The level direction the eye sits in, then tipped up by the pitch.
+  const level = add(scale(WORLD_RIGHT, sy), scale(WORLD_FRONT, cy));
+  const back = add(scale(level, cp), scale(WORLD_UP, sp));
   return {
     eye: add(p.pivot, scale(back, p.distance)),
-    right: rz([1, 0, 0]),
-    up: rz([0, -ct, st]),
+    right: sub(scale(WORLD_RIGHT, cy), scale(WORLD_FRONT, sy)),
+    up: add(scale(level, -sp), scale(WORLD_UP, cp)),
     fwd: scale(back, -1),
     tanY: Math.tan((p.fov * DEG) / 2),
+  };
+}
+
+/** Angle between this view's axis and the scene camera's (°): drives the fade-in of gizmos, labels and backdrop. */
+export const offAxis = (p: OrbitPose) => Math.acos(clamp(Math.cos(p.yaw * DEG) * Math.cos(p.pitch * DEG), -1, 1)) / DEG;
+
+/**
+ * Unit direction from world-up angles (degrees): elevation above the horizontal, swing from straight out of the
+ * page (+ = toward the page's right).
+ */
+export function fromElevationSwing(elevation: number, swing: number): Vec3 {
+  const e = elevation * DEG;
+  const s = swing * DEG;
+  const level = add(scale(WORLD_RIGHT, Math.sin(s)), scale(WORLD_FRONT, Math.cos(s)));
+  return add(scale(level, Math.cos(e)), scale(WORLD_UP, Math.sin(e)));
+}
+
+export function toElevationSwing(v: Vec3): { elevation: number; swing: number } {
+  const n = normalize(v);
+  return {
+    elevation: Math.asin(clamp(dot(n, WORLD_UP), -1, 1)) / DEG,
+    swing: Math.atan2(dot(n, WORLD_RIGHT), dot(n, WORLD_FRONT)) / DEG,
   };
 }
 
@@ -100,13 +132,6 @@ export function rayThrough(cam: CameraBasis, w: number, h: number, x: number, y:
     o: cam.eye,
     d: normalize(add(cam.fwd, add(scale(cam.right, nx * tanX), scale(cam.up, ny * cam.tanY)))),
   };
-}
-
-/** Ray parameter where o + t·d meets the plane z = z0 (Infinity when parallel or behind). */
-export function rayZ(o: Vec3, d: Vec3, z0: number): number {
-  if (Math.abs(d[2]) < 1e-9) return Infinity;
-  const t = (z0 - o[2]) / d[2];
-  return t > 0 ? t : Infinity;
 }
 
 /** Ray parameter where o + t·d meets the plane through `p` with normal `n` (Infinity when parallel or behind). */

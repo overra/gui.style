@@ -139,6 +139,18 @@ html.scene-on body {
   background: rgba(143, 255, 184, 0.92);
 }
 
+/* Light labels sit at the light's dot; lift them clear of it on screen. */
+.scene-label[data-kind='light'] {
+  translate: 0 -12px;
+}
+
+/* The gravity label hangs just below its arrow's tip (gravity points down the page by default). */
+.scene-label[data-kind='gravity'] {
+  translate: 0 calc(100% + 10px);
+  color: #1b0d33;
+  background: rgba(199, 153, 255, 0.92);
+}
+
 .scene-label[data-selected] {
   outline: 2px solid #fff;
 }

@@ -1,20 +1,22 @@
 // The scene behind the flat page. A camera looks straight at the page; its frustum, cut at the reference
 // distance, is exactly the client viewport (CSS px), so the reference plane z = 0 is "the screen". The page is a
-// background plane that can be pushed back along −z, and the goo sits on the reference plane or floats above it
-// (scene.goo.hover; levitation.ts moves it when pressed). Lights hang on a rig around the goo.
+// background plane that can be pushed back along −z, and the goo sits on the reference plane or floats in front of
+// it (scene.goo.hover; levitation.ts moves it when pressed). Lights hang on a rig around the goo. The page stands
+// upright like a screen on a wall: world up is screen-up (−y), and the scene camera is a level camera facing it.
 //
-// Normal mode still draws the flat page plus the goo overlay. The scene reaches it only through the glass
-// uniforms (key light, softboxes, eye distance, depth terms). The default scene is built from look.ts, so those
-// uniforms come out bit-identical and normal mode looks exactly as before. Config mode ray-traces the whole
-// scene from an orbit camera (src/gpu/sceneView.ts).
+// Normal mode still draws the flat page plus the goo overlay. The scene reaches it through the glass uniforms (key
+// light, softboxes, eye distance, depth terms), which the default scene builds from look.ts bit for bit, and
+// through gravity (gooGravity), which the putty feels. Config mode ray-traces the whole scene from an orbit camera
+// (src/gpu/sceneView.ts).
 
 import { d } from 'typegpu';
 import type { Theme } from '../background.ts';
+import type { GooGravity } from '../feel.ts';
 import type { GlassParams } from '../gpu/schemas.ts';
 import type { Layout } from '../layout.ts';
 import type { LevitationPose } from '../levitation.ts';
 import { looks, type Look } from '../look.ts';
-import { add, clamp, DEG, dot, fromSpherical, normalize, scale, sub, toSpherical, type Vec3 } from './math.ts';
+import { add, clamp, DEG, dot, fromSpherical, normalize, scale, sub, toSpherical, type OrbitPose, type Vec3 } from './math.ts';
 
 export type GlassInput = d.InferInput<typeof GlassParams>;
 export type LightKind = 'sun' | 'softbox';
@@ -40,7 +42,7 @@ export interface SceneLight {
 }
 
 export interface Scene {
-  /** Eye height above the reference plane (CSS px). The vertical FOV follows the viewport height. */
+  /** Eye distance in front of the reference plane (CSS px). The vertical FOV follows the viewport height. */
   camera: { distance: number };
   page: {
     /** How far the page plane sits behind the reference plane (CSS px). */
@@ -52,21 +54,53 @@ export interface Scene {
   };
   goo: {
     /**
-     * How far the button's base floats above the reference plane at rest (CSS px); the air gap under it is this
-     * plus the page depth. 0 = resting where it always did. Presses move it from there (levitation.ts).
+     * How far the button's base floats in front of the reference plane at rest (CSS px); the air gap behind it is
+     * this plus the page depth. 0 = resting where it always did. Presses move it from there (levitation.ts).
      */
     hover: number;
   };
   lights: SceneLight[];
   /** Grey and chrome probe balls beside the viewport (config view only; outside the camera's frustum). */
   probes: boolean;
+  /**
+   * Global gravity in the world frame (x right, y down the screen, z toward the viewer), in g. Screen-down by
+   * default: the page is a wall. Materials follow it through their weight; rigid bodies and particles (none yet)
+   * through G_PX.
+   */
+  gravity: Vec3;
+}
+
+/** CSS px per metre (96 per inch) and 1 g in CSS px/s², for rigid bodies and particles. */
+export const PX_PER_M = 96 / 0.0254;
+export const G_PX = 9.80665 * PX_PER_M;
+
+/**
+ * Gravity in the goo's rest frame, whose base is parallel to the screen (presses tilt it only for a moment, and
+ * the putty ignores that): along goo x and y, and into the base. `0 - z` keeps a weightless scene at +0.
+ */
+export const gooGravity = (scene: Scene): GooGravity => ({ x: scene.gravity[0], y: scene.gravity[1], n: 0 - scene.gravity[2] });
+
+/** Gravity in words, for labels: "1.0 g down the page", "0.5 g into the page", "weightless". */
+export function describeGravity(g: Vec3): string {
+  const s = Math.hypot(g[0], g[1], g[2]);
+  if (s < 0.005) return 'weightless';
+  const into = -g[2] / s;
+  const amount = `${s.toFixed(1)} g`;
+  if (into > 0.94) return `${amount} into the page`;
+  if (into < -0.94) return `${amount} out of the page`;
+  // Eight ways around the screen, from atan2(y_down, x): 0 = right, 90 = down.
+  const ways = ['to the right', 'down and right', 'down the page', 'down and left', 'to the left', 'up and left', 'up the page', 'up and right'];
+  const way = ways[(Math.round(Math.atan2(g[1], g[0]) / DEG / 45) + 8) % 8];
+  const tilt = into > 0.17 ? ', into the page' : into < -0.17 ? ', out of the page' : '';
+  return `${amount} ${way}${tilt}`;
 }
 
 /** The look.ts lights are at infinity; the rig places them this far from the goo, keeping their angular sizes. */
 export const RIG_DISTANCE = 1100;
 /** Highest hover the controls offer (CSS px): normal mode's goo canvas can still fit the shadow (main.ts). */
 export const MAX_HOVER = 150;
-const SOFTBOX_NAMES = ['Overhead softbox', 'Key strip', 'Cool kicker'];
+// On a wall the first softbox hangs in front of the screen, 16° off the camera's axis.
+const SOFTBOX_NAMES = ['Front softbox', 'Key strip', 'Cool kicker'];
 
 const v3 = (v: readonly number[]): Vec3 => [v[0], v[1], v[2]];
 
@@ -109,6 +143,7 @@ export function defaultScene(): Scene {
     goo: { hover: 0 },
     lights: [sun, ...boxes],
     probes: true,
+    gravity: [0, 1, 0],
   };
 }
 
@@ -119,7 +154,22 @@ export const cameraFov = (scene: Scene, viewportH: number) => (2 * Math.atan(vie
 
 export const distanceForFov = (fovDeg: number, viewportH: number) => viewportH / 2 / Math.tan((fovDeg * DEG) / 2);
 
-export const cameraEye = (scene: Scene): Vec3 => [0, 0, scene.camera.distance];
+/**
+ * The point on the reference plane on the scene camera's axis. The origin today; a camera that scrolls down a tall
+ * page will move it, and everything placed relative to the scene camera goes through here.
+ */
+export const cameraOrigin = (_scene: Scene): Vec3 => [0, 0, 0];
+
+export const cameraEye = (scene: Scene): Vec3 => add(cameraOrigin(scene), [0, 0, scene.camera.distance]);
+
+/** The scene camera as an orbit pose (yaw 0, pitch 0): what normal mode shows. */
+export const sceneCameraPose = (scene: Scene, viewportH: number): OrbitPose => ({
+  pivot: cameraOrigin(scene),
+  yaw: 0,
+  pitch: 0,
+  distance: scene.camera.distance,
+  fov: cameraFov(scene, viewportH),
+});
 
 /** World units per page CSS px: (D + depth) / D when the plane fills the viewport, 1 when it keeps its size. */
 export function planeScale(scene: Scene): number {
@@ -148,16 +198,16 @@ export interface GooFrame {
 }
 
 /**
- * The putty's scale at height z above the reference plane. It is anchored to the screen: scaled about the camera
- * eye, so the camera sees it exactly on its DOM box at any height (normal mode, input and focus rings stay exact).
- * Only the gap below it gives the height away, and the parallax when the view orbits.
+ * The putty's scale at distance z in front of the reference plane. It is anchored to the screen: scaled about the
+ * camera eye, so the camera sees it exactly on its DOM box at any distance (normal mode, input and focus rings stay
+ * exact). Only the gap behind it gives the distance away, and the parallax when the view orbits.
  */
 const anchorScale = (scene: Scene, z: number) => {
   const D = scene.camera.distance;
   return Math.max(D - z, 0.2 * D) / D;
 };
 
-/** Axes of a base tilted by `slopes` (it sits slope·Δ lower Δ px along each axis): its normal leans that way. */
+/** Axes of a base tilted by `slopes` (it sits slope·Δ nearer the page Δ px along each axis): its normal leans over. */
 function tiltAxes(tx: number, ty: number): { x: Vec3; y: Vec3; z: Vec3 } {
   const s2 = tx * tx + ty * ty;
   if (s2 < 1e-14) return { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
@@ -174,7 +224,7 @@ function tiltAxes(tx: number, ty: number): { x: Vec3; y: Vec3; z: Vec3 } {
   return { x: rot([1, 0, 0]), y: rot([0, 1, 0]), z: rot([0, 0, 1]) };
 }
 
-/** Where the levitating goo is: its pivot at height pose.z on the camera ray through the pivot's DOM position. */
+/** Where the levitating goo is: its pivot pose.z in front of the reference plane, on the camera ray through its DOM position. */
 export function gooFrame(scene: Scene, layout: Layout, pose: LevitationPose): GooFrame {
   const k = anchorScale(scene, pose.z);
   const [px, py] = pose.pivot;
@@ -196,7 +246,7 @@ export const gooFrameDir = (f: GooFrame, v: Vec3): Vec3 => [dot(v, f.x) / f.scal
 export const fromGooFrame = (f: GooFrame, g: Vec3): Vec3 =>
   add(f.origin, scale(add(add(scale(f.x, g[0]), scale(f.y, g[1])), scale(f.z, g[2])), f.scale));
 
-/** The goo center at its rest height (world), i.e. the rig target. Lights follow the hover, not the presses. */
+/** The goo center at its rest hover (world), i.e. the rig target. Lights follow the hover, not the presses. */
 export function rigTarget(layout: Layout | null, scene: Scene): Vec3 {
   const s = layout?.shapes[0];
   if (!layout || !s) return [0, 0, scene.goo.hover];
@@ -214,8 +264,9 @@ export const physicalHalfSize = (l: SceneLight): [number, number] =>
   l.kind === 'sun' ? [l.radius * l.refDistance, l.radius * l.refDistance] : [l.halfSize[0] * l.refDistance, l.halfSize[1] * l.refDistance];
 
 /**
- * Re-aims a light at the target from a new direction (look.ts's softbox frame convention: long axis horizontal,
- * short axis down the polar great circle). The light stays above the page and off the zenith.
+ * Re-aims a light at the target from a new direction (look.ts's softbox frame convention: the long axis stays
+ * tangential around the page's axis, the short axis runs along the great circle through it). The light stays
+ * between 1° and 85° off the page's axis, in front of the page.
  */
 export function aimLight(l: SceneLight, dir: Vec3) {
   const { polar, azimuth } = toSpherical(dir);
@@ -259,7 +310,7 @@ export function glassLights(scene: Scene, theme: Theme): Partial<GlassInput> {
   return out;
 }
 
-/** Shadow reach follows the key light's elevation (look.ts's value is tuned for its default sun). */
+/** Shadow reach follows the tangent of the key light's angle off the page's axis (look.ts's value suits its sun). */
 function shadowReachFor(scene: Scene, look: Look): number {
   const sun = scene.lights.find((l) => l.kind === 'sun');
   if (!sun) return look.shadowReach;

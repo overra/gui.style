@@ -1,10 +1,11 @@
-// Levitation: the button can float above the page on an air cushion, a damped spring under its whole base. A
-// press pushes the whole button toward the page and tilts it toward an off-centre finger, on top of the squish;
-// let go and it springs back past its rest height and settles. A new hover height is reached the same way, so the
-// button lifts off and lands instead of jumping.
+// Levitation: the button can float in front of the page on an air cushion, a damped spring behind its whole base.
+// A press pushes the whole button toward the page and tilts it toward an off-centre finger, on top of the squish;
+// let go and it springs back past its rest distance and settles. A new hover distance is reached the same way, so
+// the button lifts off and lands instead of jumping.
 //
-// This is rigid-body state only (CPU): the base's height at the pivot and its tilt. The renderers carry the
-// putty's own frame with it (scene/scene.ts: gooFrame for the 3D view, glassDepthTerms for the flat overlay).
+// This is rigid-body state only (CPU): the base's distance from the reference plane at the pivot, and its tilt.
+// The renderers carry the putty's own frame with it (scene/scene.ts: gooFrame for the 3D view, glassDepthTerms for
+// the flat overlay).
 
 import type { Effective } from './feel.ts';
 import { sceneSdf, type Layout } from './layout.ts';
@@ -12,16 +13,16 @@ import { params, restHeightCpu } from './params.ts';
 import type { FingerTracker } from './touches.ts';
 
 export interface LevitationPose {
-  /** Height of the base at the pivot above the reference plane (CSS px). The air gap is this plus the page depth. */
+  /** The base's distance in front of the reference plane at the pivot (CSS px); the air gap adds the page depth. */
   z: number;
-  /** Slopes of the base: it sits tilt·(p − pivot) lower at goo-space point p (it dips toward an off-centre press). */
+  /** Slopes of the base: it sits tilt·(p − pivot) nearer the page at goo-space point p (it dips toward a press). */
   tilt: [number, number];
   /** Goo-space pivot: the centroid of the resting footprint. */
   pivot: [number, number];
 }
 
 export interface LevitationInput {
-  /** Rest height of the base above the reference plane (scene.goo.hover), and the page's depth behind it. */
+  /** Rest distance of the base in front of the reference plane (scene.goo.hover), and the page's depth behind it. */
   hover: number;
   pageDepth: number;
   layout: Layout;
@@ -92,10 +93,10 @@ function measure(layout: Layout): Cushion {
 export function createLevitation() {
   let cushion: Cushion | null = null;
   let started = false;
-  /** Rest height last seen, and the targets of the last step. */
+  /** Rest distance last seen, and the targets of the last step. */
   let rest = 0;
   let target = { z: 0, tx: 0, ty: 0 };
-  // Base height at the pivot and the two tilt slopes, with their rates.
+  // The base's distance at the pivot and the two tilt slopes, with their rates.
   let z = 0;
   let vz = 0;
   let ax = 0;
@@ -172,9 +173,9 @@ export function createLevitation() {
       ay += vay * h;
     }
     // The base never reaches the page: it bottoms out on the cushion instead.
-    const floor = MIN_GAP * gap - pageDepth + Math.abs(ax) * c.reachX + Math.abs(ay) * c.reachY;
-    if (z < floor) {
-      z = floor;
+    const lowest = MIN_GAP * gap - pageDepth + Math.abs(ax) * c.reachX + Math.abs(ay) * c.reachY;
+    if (z < lowest) {
+      z = lowest;
       vz = Math.max(vz, 0);
     }
     publish();

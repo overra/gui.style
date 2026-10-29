@@ -16,12 +16,17 @@ export const simShared = tgpu.bindGroupLayout({
   fingers: { uniform: d.arrayOf(Finger, MAX_FINGERS) },
 });
 
-/** state (e, v, m, age) + rest → state with e, v advanced and m healed; plastic pressure head. */
+/**
+ * state (e, v, m, age) + rest + the settled shape → state with e, v advanced and m healed toward the settled shape;
+ * plastic pressure head P and its part from the deviation from the settled shape (what creep levels).
+ */
 export const elasticLayout = tgpu.bindGroupLayout({
   state: unfilterable,
   rest: unfilterable,
+  /** The settle layer's state: .z is the settled shape m_s (all zero while the material holds its molded shape). */
+  settle: unfilterable,
   stateOut: { storageTexture: d.textureStorage2d('rgba32float', 'write-only') },
-  pressureOut: { storageTexture: d.textureStorage2d('r32float', 'write-only') },
+  pressureOut: { storageTexture: d.textureStorage2d('rg32float', 'write-only') },
 });
 
 /** pressure + previous inertial face flux → (qx, qy, fx, fy) for the cell's +x and +y faces. */
@@ -56,6 +61,7 @@ export const applyLayout = tgpu.bindGroupLayout({
 export const packLayout = tgpu.bindGroupLayout({
   state: unfilterable,
   rest: unfilterable,
+  settle: unfilterable,
   packOut: { storageTexture: d.textureStorage2d('rgba16float', 'write-only') },
   coverOut: { storageTexture: d.textureStorage2d('rgba16float', 'write-only') },
 });
@@ -86,6 +92,11 @@ export const fingerDist2 = (x: d.v2f, pos: d.v2f, prev: d.v2f, axes: d.v2f, rot:
 const loadState = (p: d.v2i, dims: d.v2u) => {
   'use gpu';
   return std.textureLoad(elasticLayout.$.state, clampCell(p, dims), 0);
+};
+
+const loadSettled = (p: d.v2i, dims: d.v2u) => {
+  'use gpu';
+  return std.textureLoad(elasticLayout.$.settle, clampCell(p, dims), 0).z;
 };
 
 export const elasticKernel = tgpu.computeFn({
@@ -138,35 +149,52 @@ export const elasticKernel = tgpu.computeFn({
     v = std.max(v, 0);
   }
 
-  let g = sp.gravity;
+  // Shape memory (cohesion) and the weight pressing into the base pull toward the molded shape; the bare page
+  // doesn't wet (adhesion contrast); surface tension levels. P_dev is the same head for the deviation from the
+  // settled shape m_s: creep levels only that, so a shape the yield holds stays put.
+  const ms = std.textureLoad(elasticLayout.$.settle, p, 0).z;
+  const lapS =
+    loadSettled(p.sub(d.vec2i(1, 0)), dims) +
+    loadSettled(p.add(d.vec2i(1, 0)), dims) +
+    loadSettled(p.sub(d.vec2i(0, 1)), dims) +
+    loadSettled(p.add(d.vec2i(0, 1)), dims) -
+    4 * ms;
+  let g = sp.restore;
   if (rest < sp.dryLevel) {
     g = g + sp.dewet;
   }
   const pressure = g * c.z - sp.tension * lapM + push;
+  const pressureDev = g * (c.z - ms) - sp.tension * (lapM - lapS) + push;
 
-  // Self-healing: near a pressing finger the imprint holds; elsewhere it eases back to the resting shape.
+  // Self-healing: near a pressing finger the imprint holds; elsewhere it eases back to the settled shape (the
+  // molded shape while the material can hold it).
   let age = std.min(c.w + sp.dt, 100);
   if (near < sp.healZone2) {
     age = d.f32(0);
   }
   const heal = sp.healRate * std.smoothstep(sp.healHold, sp.healHold + sp.healRamp, age);
-  const m = c.z * std.exp(-heal * sp.dt);
+  const m = ms + (c.z - ms) * std.exp(-heal * sp.dt);
 
   std.textureStore(elasticLayout.$.stateOut, gid.xy, d.vec4f(e, v, m, age));
-  std.textureStore(elasticLayout.$.pressureOut, gid.xy, d.vec4f(pressure, 0, 0, 0));
+  std.textureStore(elasticLayout.$.pressureOut, gid.xy, d.vec4f(pressure, pressureDev, 0, 0));
 });
 
-/** New inertial flux q and total flux f (q + creep) across one face. */
-const faceFlux = (qPrev: number, drop: number, restA: number, restB: number) => {
+/**
+ * New inertial flux q and total flux f (q + creep) across one face: `drop` and `devDrop` are the head drops of P
+ * and P_dev, `weight` the potential drop gravity adds along the base.
+ */
+const faceFlux = (qPrev: number, drop: number, devDrop: number, weight: number, restA: number, restB: number) => {
   'use gpu';
   const sp = simShared.$.sim;
+  // Cohesion: the Bingham yield. Adhesion: a contact-line face holds the pin head (it used to slide freely).
   let yieldHead = sp.yieldHead;
   if (std.min(restA, restB) < sp.dryLevel) {
-    yieldHead = d.f32(0);
+    yieldHead = sp.pinHead;
   }
-  const drive = std.sign(drop) * std.max(std.abs(drop) - yieldHead, 0);
+  const total = drop + weight;
+  const drive = std.sign(total) * std.max(std.abs(total) - yieldHead, 0);
   let q = qPrev * sp.fluxDecay + sp.dt * sp.fluxGain * drive;
-  let f = q + sp.creep * drop;
+  let f = q + sp.creep * devDrop;
   // Dry page on both sides: nothing flows (keeps films from creeping across the page).
   if (std.max(restA, restB) < sp.dryLevel) {
     q = d.f32(0);
@@ -184,29 +212,22 @@ export const fluxKernel = tgpu.computeFn({
   if (gid.x >= dims.x || gid.y >= dims.y) {
     return;
   }
+  const sp = simShared.$.sim;
   const p = d.vec2i(gid.xy);
-  const p0 = std.textureLoad(fluxLayout.$.pressure, p, 0).x;
+  const p0 = std.textureLoad(fluxLayout.$.pressure, p, 0);
   const r0 = std.textureLoad(fluxLayout.$.rest, p, 0).x;
   const qPrev = std.textureLoad(fluxLayout.$.flux, p, 0);
   let fx = d.vec2f(0, 0);
   let fy = d.vec2f(0, 0);
   if (gid.x + 1 < dims.x) {
     const n = p.add(d.vec2i(1, 0));
-    fx = faceFlux(
-      qPrev.x,
-      p0 - std.textureLoad(fluxLayout.$.pressure, n, 0).x,
-      r0,
-      std.textureLoad(fluxLayout.$.rest, n, 0).x,
-    );
+    const pn = std.textureLoad(fluxLayout.$.pressure, n, 0);
+    fx = faceFlux(qPrev.x, p0.x - pn.x, p0.y - pn.y, sp.driveX, r0, std.textureLoad(fluxLayout.$.rest, n, 0).x);
   }
   if (gid.y + 1 < dims.y) {
     const n = p.add(d.vec2i(0, 1));
-    fy = faceFlux(
-      qPrev.y,
-      p0 - std.textureLoad(fluxLayout.$.pressure, n, 0).x,
-      r0,
-      std.textureLoad(fluxLayout.$.rest, n, 0).x,
-    );
+    const pn = std.textureLoad(fluxLayout.$.pressure, n, 0);
+    fy = faceFlux(qPrev.y, p0.x - pn.x, p0.y - pn.y, sp.driveY, r0, std.textureLoad(fluxLayout.$.rest, n, 0).x);
   }
   std.textureStore(fluxLayout.$.fluxOut, gid.xy, d.vec4f(fx.x, fy.x, fx.y, fy.y));
 });
@@ -291,10 +312,16 @@ export const applyKernel = tgpu.computeFn({
   std.textureStore(applyLayout.$.fluxOut, gid.xy, d.vec4f(qx, qy, 0, 0));
 });
 
+const settledAt = (p: d.v2i, dims: d.v2u) => {
+  'use gpu';
+  return std.textureLoad(packLayout.$.settle, clampCell(p, dims), 0).z;
+};
+
+/** The live deviation from the settled shape (elastic + plastic); `imprintGain` exaggerates only this. */
 const displacement = (p: d.v2i, dims: d.v2u) => {
   'use gpu';
   const s = std.textureLoad(packLayout.$.state, clampCell(p, dims), 0);
-  return s.x + s.z;
+  return s.x + s.z - settledAt(p, dims);
 };
 
 export const packKernel = tgpu.computeFn({
@@ -309,7 +336,11 @@ export const packKernel = tgpu.computeFn({
   const inv = 1 / simShared.$.sim.cell;
   const p = d.vec2i(gid.xy);
   let u = displacement(p, dims);
-  std.textureStore(packLayout.$.coverOut, gid.xy, d.vec4f(std.textureLoad(packLayout.$.rest, p, 0).x + u, 0, 0, 0));
+  // Cover: the total height, plus the settled shape and its slope (drawn as is, never exaggerated).
+  const ms = settledAt(p, dims);
+  const msx = (settledAt(p.add(d.vec2i(1, 0)), dims) - settledAt(p.sub(d.vec2i(1, 0)), dims)) * 0.5 * inv;
+  const msy = (settledAt(p.add(d.vec2i(0, 1)), dims) - settledAt(p.sub(d.vec2i(0, 1)), dims)) * 0.5 * inv;
+  std.textureStore(packLayout.$.coverOut, gid.xy, d.vec4f(std.textureLoad(packLayout.$.rest, p, 0).x + u + ms, ms, msx, msy));
   // A healed surface must be exactly pristine: sub-pixel ripples would wobble reflections ("orange peel").
   if (std.abs(u) < 0.02) {
     u = d.f32(0);
