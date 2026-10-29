@@ -78,7 +78,8 @@ orbits around world up with a level horizon. From behind, the page shows its dar
 - F, O and V fly to the goo, an overview and the camera. Esc or C goes back.
 
 With html-in-canvas (Chrome 157 and later) the page UI is drawn into the scene as a texture; elsewhere a CSS 3D
-transform carries the live DOM along. Design notes are in `docs/3d-config-view.md`.
+transform carries the live DOM along. Design notes are in `docs/3d-config-view.md`; what comes next is in
+`docs/roadmap.md`.
 
 ## How it works
 

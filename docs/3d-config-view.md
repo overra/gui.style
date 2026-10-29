@@ -656,6 +656,9 @@ __goo.eff(); __goo.snap(); __goo.resetClock(1000)   // effective params; snap to
 
 ## Next steps and open questions
 
+The longer plan (tall pages and camera scrolling, several pages, scroll-scrubbed video, depth of field, gobos,
+materials on meshes, particles) is in [roadmap.md](roadmap.md).
+
 1. **Make the scene authoritative.** Persist and export it (JSON), and let look.ts hold only the environment (sky,
    horizon, ground). The rig would then be the single source of lighting.
 2. **Positional lighting in the glass.** Per-pixel light directions, point and spot lights, and any number of
