@@ -82,6 +82,12 @@ html.scene-on body {
   overflow: hidden;
 }
 
+/* The scene canvas sits at z-index -1, under the page UI. Without a stacking context of its own, body's box
+   (as tall as the viewport) would sit above the canvas and take every drag, scroll and press meant for it. */
+html.scene-on body {
+  isolation: isolate;
+}
+
 /* html-in-canvas: the UI is laid out inside this canvas and drawn into the 3D scene. */
 .scene-ui-canvas {
   position: fixed;
