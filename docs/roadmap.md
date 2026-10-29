@@ -51,8 +51,8 @@ Later work can rely on two frames kept apart. The page frame (z is the page norm
 the softbox frames, the goo frame and `groundLight`, since a screen on a wall reflects the room in front of it (Q1).
 World up holds the orbit, the backdrop, labels and light angles, and later a camera pitch or focal-plane tilt, always
 about a horizontal axis. Gravity is a separate world vector, and the view's up doesn't follow it. At yaw 0, pitch 0
-the 3D path matches normal mode (0.93/255 mean over the goo canvas, measured before the levitation merge), so a
-transition can cross-fade into it and out.
+the 3D path matches normal mode (a mean of 0.76/255 over the goo canvas in the light theme and 1.05 in the dark,
+measured in M0), so a transition can cross-fade into it and out.
 
 ### Material: adhesion, cohesion and surface tension
 
@@ -86,6 +86,33 @@ Later work can rely on one gravity vector, read in each element's rest frame, so
 reads its own axes; on an O(1) sag check that names the regime (holds, weeps at its edge, sags, would run, would
 drip); and on a legacy setting, `?gravity=off` with `plastic.pin = 0`, that matches the old simulation to within
 float rounding.
+
+### Safety net (M0)
+
+Runs repeat exactly, and the dev harness compares frames, putty volume and glass uniforms. Normal mode's frames did
+not change: a seeded run (the intro, a press, a drag, the release, then rest after 20 s) gives bit-identical frames on
+5f03d56 and with M0, in both themes and with `?perf` on. Phone testing over https is deferred (the user's call,
+2026-10-29), so Q26 stays open.
+
+- **Seeded runs.** `__goo.seed(n)` swaps in a seeded `Math.random`, repaints and re-uploads the page, restarts the
+  tracker's print seeds and forgets held input. On the virtual clock, input takes its event times from that clock,
+  and `resetClock()` also restarts the substep phase. After `seed(n)`, `resetClock()` and `snap()` (or `drop()`),
+  the same inputs give the same frames, within one load and across reloads, through pointer, keyboard and
+  assistive-tech presses alike.
+- **Comparisons.** `__goo.diff(a, b, rect?)` lines two frame copies up on screen and resamples them to CSS px when
+  their scales differ; `__goo.sim.stats()` gives the putty's volume, centroid and range of m (under a held press the
+  volume stays within 3 parts in 10⁸ of its resting volume); `__goo.glass()` gives the uniforms the glass last
+  received.
+- **Test pages.** `?art=flat` is one solid colour and `?art=bars` black and white bars 32 px wide, both without grain.
+  `?tall=N&at=M` pads the body; at DPR 2, `?tall=6000` still falls back to the static button, as its 2880 × 13,800
+  page texture is over the 8192 px limit (M2).
+- **`?perf`**, in any build: an overlay with the frame interval, the frame loop's JavaScript time, GPU time per
+  renderer and resident memory (`src/perf.ts`, a 4.4 KB chunk loaded only on request; `__goo.perf()` in dev). GPU
+  time comes from timestamp queries on the first and last pass of each renderer's frame (`src/gpu/timing.ts`);
+  without `?perf` no feature is requested and no pass is timed. Memory counts every texture and buffer the device
+  creates, by size, plus each canvas's buffers (an estimate: two swap-chain textures per WebGPU canvas).
+- **Baselines** are in [Budgets](#budgets-proposal-desktop-measured-in-m0), and the parity above in
+  [`docs/3d-config-view.md`](3d-config-view.md#scene-model-and-math).
 
 ## Target architecture (proposal)
 
@@ -302,8 +329,8 @@ site/gobos/<id>.png|ktx2
   the feature, which `requestDevice` must ask for; its WebAssembly transcoder loads only for pages with KTX2 assets.
 - **Snapshots.** The build renders each page small in a headless browser, a new build dependency. Snapshots stand in
   where html-in-canvas is missing, serve far views of tall pages, and hold the place until the art is resident.
-- **The fallback** stops loading GPU code. Today the static button still loads 463 KB of JavaScript (128 KB gzip, in
-  the latest `dist/` build: the main chunk and the shared TypeGPU chunk it imports). main.ts imports `tgpu` and
+- **The fallback** stops loading GPU code. Today the static button still loads 464 KB of JavaScript (128.5 KB gzip,
+  measured in M0: the main chunk and the shared TypeGPU chunk it imports). main.ts imports `tgpu` and
   `createGoo` statically, and the always-loaded scene host imports scene.ts, which builds uniforms with TypeGPU's `d`.
   Check for WebGPU first, then `import()` the GPU code; scene.ts returns plain tuples and goo.ts converts them. This
   part can land at any time.
@@ -438,16 +465,17 @@ useblume.dev (Q25). Proposal: Static Assets first, with no Worker script. `wrang
   revalidation on HTML; check the current Workers support, and test it under `wrangler dev`, since `vite preview`
   ignores it. Static Assets cap each file's size (25 MiB when last checked), so big videos and image sequences go in
   R2, behind a small Worker that answers Range requests.
-- The dev harness is dev-only, so production builds get a `?perf` overlay for phones: frame time, GPU time where
-  timestamp queries exist, and resident MB. The 3D view's button shows only in dev or with `?scene` or `?tune`, but
-  the C key opens the view for anyone, production included (Q24).
+- The dev harness is dev-only, so production builds have a `?perf` overlay for phones (landed in M0): the frame
+  interval, JavaScript and GPU time per frame (GPU where timestamp queries exist), and resident MiB. The 3D view's
+  button shows only in dev or with `?scene` or `?tune`, but the C key opens the view for anyone, production included
+  (Q24).
 - Docs: `docs/*.md` stay the source, tables come from the material schema, and live demos embed gui.style routes.
 
 ## Milestones
 
 | ID | Milestone | Size | Needs | Normal mode | Done when |
 |---|---|---|---|---|---|
-| M0 | Safety net: seeded randomness and event times, `__goo.diff`, `__goo.sim.stats`, `__goo.glass`, test arts, `?tall`, `?perf`; fresh size, parity and budget baselines; phone testing over https | S | – | unchanged | Two seeded runs give identical frames; the baselines are recorded |
+| M0 | Safety net: seeded randomness and event times, `__goo.diff`, `__goo.sim.stats`, `__goo.glass`, test arts, `?tall`, `?perf`; fresh size, parity and budget baselines; phone testing over https. **Landed**; phone testing deferred (2026-10-29) | S | – | unchanged | Two seeded runs give identical frames; the baselines are recorded |
 | M1 | Scene document v1; materials as data | M | M0 | identical | `export()` and `load()` round-trip; `identity()` is 0; seeded frames are unchanged |
 | M2 | Camera height, tall pages, Shift+scroll, `viewCenter`, the 3D view's window/page split, device limits, tiles | L | M1 | scrolling made correct | `?tall=6000` runs at DPR 2; scrolled 1200 px on `?tall=3000&at=1200&art=flat`, the goo matches scroll 0 within 1 LSB; a 300 px Shift+wheel moves the frustum 300 px, and exit lands at `scrollY` 300 |
 | M3 | DOF and tilt-shift in the 3D view | M | M1 | unchanged | On `?art=bars` the 10–90% edge width follows 0.69·CoC, about 7.4 px at the bottom edge with the band preset |
@@ -488,40 +516,51 @@ only the simulation and glass instancing. Particles wait for M5.
 | Device loss; WebGPU reach, last checked in late 2025: Chrome and Edge on desktop, Chrome on Android 12+ with some GPUs, Safari 26, Firefox on Windows | Every resource rebuilds from CPU sources (`start()` retries after the first two losses in a minute and gives up at the third); recheck reach; keep the static fallback |
 | html-in-canvas is Chrome and Edge 157+ only; WebKit leans toward support, Mozilla has no position | Every feature keeps a path without it: CSS 3D (no depth sorting, no shader effects on the DOM) or build-time snapshots |
 | 3D hit testing under html-in-canvas needs `updateElementGeometry`; perspective `canvasTransform`s are unconfirmed; UI blanks for a frame or two moving into a drawable canvas, snapshots lag paint, and cross-origin content and system colours aren't painted | Picking by rays, as `gooHit` does, with a page interactive only while it faces the camera; pages drawable permanently; the previous texture held until the first paint |
-| Full-viewport tracing on phones (about 1.3 MP at DPR 2, 96 march steps plus the glass) is unlikely to hold 60 Hz on mid-range GPUs (not measured); thermal throttling, tab kills and iOS canvas-area limits | Islands by default; dynamic resolution; half-resolution effects; the march is already culled to the element's box; resident budgets with an LRU; at most 4 decoded video frames; budget tests on real phones from M0 |
+| Full-viewport tracing on phones (about 1.3 MP at DPR 2, 96 march steps plus the glass) is unlikely to hold 60 Hz on mid-range GPUs (not measured); thermal throttling, tab kills and iOS canvas-area limits | Islands by default; dynamic resolution; half-resolution effects; the march is already culled to the element's box; resident budgets with an LRU; at most 4 decoded video frames; budget tests on real phones, deferred from M0 |
 | Drawn UI loses semantics, focus, find-in-page, translation, zoom, forced colours and user styles; the 3D view is mostly canvas | The DOM is the truth and WebGPU only draws it; the lil-gui panel, the shortcuts (C, Esc, F, O, V) and keyboard camera moves cover the 3D view |
 | DOF, gobos over text and translucent stacks hurt legibility | Interactive and focused elements stay sharp; `prefers-contrast: more` turns DOF and gobos over text off; a user toggle |
 
-## Budgets (proposal; measure in M0)
+## Budgets (proposal; desktop measured in M0)
 
-| | Desktop | Phone (mid-range, 60 Hz) |
-|---|---|---|
-| Idle | 0: the loop sleeps, as now | 0 |
-| Pressing one element (islands) | ≤ 2 ms GPU | ≤ 4 ms GPU |
-| Scene layer in normal mode | ≤ 6 ms at ≤ 3.2 MP | ≤ 8 ms at ≤ 1.3 MP, with dynamic resolution |
-| 3D view | Holds the display's 120 Hz while orbiting now (an 8.3 ms frame interval on an M-series GPU; GPU time not measured) | ≤ 12 ms at ≤ 1 MP |
-| GPU memory | ≤ 512 MB | ≤ 256 MB |
-| First-load JavaScript, home route | 128 KB gzip (463 KB) in the latest `dist/` build; M0 records the baseline | The same; the static fallback loads no GPU code |
-| Particles | 4096 | 1024 |
+| | Desktop | Phone (mid-range, 60 Hz) | Measured in M0, desktop |
+|---|---|---|---|
+| Idle | 0: the loop sleeps, as now | 0 | The sleep is unchanged; not re-measured, as a hidden pane runs no rAF |
+| Pressing one element (islands) | ≤ 2 ms GPU | ≤ 4 ms GPU | GPU 0.5–0.9 ms a frame (median), p95 2.4–3.7 ms, the same at rest, held, dragging or healing; JavaScript 0.2–0.9 ms; a 0.25 MP goo canvas |
+| Scene layer in normal mode | ≤ 6 ms at ≤ 3.2 MP | ≤ 8 ms at ≤ 1.3 MP, with dynamic resolution | Not built (M5) |
+| 3D view | Holds the display's 120 Hz while orbiting (an 8.3 ms frame interval, measured on 2026-10-28) | ≤ 12 ms at ≤ 1 MP | The scene pass at 3.2 MP (median): 1.2 ms holding the overview, 2.4 ms orbiting it, 3.1 ms orbiting close to the goo, 2.2 ms at the camera pose; p95 2.5–4.4 ms. Plus 0.3–0.4 ms for the goo's own frame, and 3.1–3.5 ms of JavaScript a frame |
+| GPU memory | ≤ 512 MB | ≤ 256 MB | 59 MiB in normal mode: textures 37.3 (the page with its mips 26.4, the fingerprint layer 9.7, the simulation and label 1.3) and canvases 21.7. 96 MiB with the 3D view open: its depth target adds 12.2, its canvas 24.4. Canvases count two swap-chain textures per WebGPU canvas |
+| First-load JavaScript, home route | No more than the M0 baseline | The same; the static fallback loads no GPU code (M8) | 464.1 KB: 128.5 KB gzip (as Vite reports it), 109.3 KB brotli. Before M0: 462.6 KB, 127.9 KB gzip |
+| Particles | 4096 | 1024 | Not built (M11) |
+
+Measured on 2026-10-29 in the in-app browser (Chromium 152) on a MacBook Pro with an M3 Max (30-core GPU), emulating
+a 1440 × 900 window at DPR 2 in the light theme, with `?perf`. The harness drove one frame per task
+(`drive(1000 / 60)`, then a 0–16 ms wait), so most frames' timestamps came back; each figure covers 70–120 timed
+frames. Chrome rounds timestamps to 65.5 µs and `performance.now()` to 0.1 ms. The pane was hidden, so no rAF ran
+and frame intervals weren't measured; the overlay shows them on a visible page. The adapter is `'low-power'`, and at
+low load GPU times include the clock ramping up: the goo's frame takes 0.26–0.39 ms while the 3D view keeps the GPU
+busy, against 0.5–0.9 ms alone. The phone column stays unmeasured while phone testing is deferred.
 
 ## Dev harness additions
 
 Pitfalls that still apply: a hidden pane gets no rAF, `ResizeObserver` or scroll callbacks, so call
-`__goo.relayout()` after changing layout or scrolling. After `enter()` or `exit()`, run `shot(1500)` or
-`drive(1000)`, because the wheel and the shortcuts work only once the 3D view's phase is 'on'. Until `__goo.seed`
-exists, compare pixels within one page load, or replace `Math.random` with a seeded generator and repaint first (a
-`resize` event). Across builds, also wait 20 s after load: the intro's set factor reaches exactly 1 only after about
-9.6 s in f32 and 19.5 s in f64. Test html-in-canvas in Chrome 157 or later (Chrome 158, through Claude in Chrome) and
-the fallbacks in the in-app browser (Chromium 152). Dispatched events skip hit testing, so check real pointer paths
-with `document.elementFromPoint` or real drags.
+`__goo.relayout()` after changing layout or scrolling, and read frame intervals only on a visible page. After
+`enter()` or `exit()`, run `shot(1500)` or `drive(1000)`, because the wheel and the shortcuts work only once the 3D
+view's phase is 'on'. Start runs that must repeat with `seed(n)`, `resetClock()` and `snap()` or `drop()`. Against a
+build without `seed`, set `Math.random` to the same generator (`seededRandom` in `src/harness.ts`), repaint with a
+`resize` event, then set `__goo.tracker.seedCounter = Math.random() * 1000`, in that order, and start with `drop()`,
+which restarts the substep phase there too. Without `resetClock()`, wait 20 s after load: the intro's set factor
+reaches exactly 1 only after about 9.6 s in f32 and 19.5 s in f64. `drive()` runs its frames in one task, so `?perf`
+gets one GPU reading per call; to time every frame, drive one per task. Test html-in-canvas in Chrome 157 or later
+(Chrome 158, through Claude in Chrome) and the fallbacks in the in-app browser (Chromium 152). Dispatched events skip
+hit testing, so check real pointer paths with `document.elementFromPoint` or real drags.
 
 | New | Milestone | What it does |
 |---|---|---|
-| `__goo.seed(n)` | M0 | Seeds `Math.random` (the page grain, the finger angle, tap jitter), resets the tracker's print seeds and repaints the page; on the virtual clock, input takes its event times from that clock |
-| `__goo.diff(a, b, rect?)` | M0 | `{ mean, max, over1 }` in 8-bit units, after resampling both canvases to CSS px over `rect` (the scene and goo canvases have different scales) |
-| `__goo.sim.stats(element?)` | M0 | Volume Σ(rest + m)·cell², centroid and the range of m, built on the existing `__goo.readSim()` readback |
-| `__goo.glass()` | M0 | The last glass uniforms written |
-| `?art=flat`, `?art=bars`, `?tall=N&at=M`, `?perf` | M0 | A solid and a high-contrast test art; a page N px taller, with M px of the extra above `.stage`; the perf overlay |
+| `__goo.seed(n)` | M0 (landed) | Seeds `Math.random` (the page grain, the finger angle, tap jitter; `null` restores the browser's), repaints and re-uploads the page, restarts the tracker's print seeds and forgets held input; on the virtual clock, input takes its event times from that clock |
+| `__goo.diff(a, b, rect?)` | M0 (landed) | `{ mean, max, over1 }` in 8-bit units over the RGB values (`over1`: the share more than 1 apart), over `rect` in viewport CSS px, by default wherever both copies are. Copies of the same size and place compare pixel for pixel; otherwise both are resampled to CSS px (the scene and goo canvases have different scales) |
+| `__goo.sim.stats(element?)` | M0 (landed) | Volume Σ(rest + m)·cell², the resting volume, the volume's centroid in page px and the range of m, from `__goo.readSim()` |
+| `__goo.glass()` | M0 (landed) | The glass uniforms the last frame wrote, after the scene hook |
+| `?art=flat`, `?art=bars`, `?tall=N&at=M`, `?perf`, `__goo.perf()` | M0 (landed) | A solid and a high-contrast test art; a page N px taller, with M px of the extra above `.stage`; the perf overlay and its figures |
 | `__goo.scene.export()`, `load(doc)` | M1 | Round-trips the scene document |
 | `__goo.scrollTo(y)`, `__goo.scene.camera.scrollTo(s)`, `.y` | M2 | Scrolls the page's scroller and re-measures; moves the scene camera; reads its height on the page |
 | `config().dev.setOptics(o)`, `dev.cocAt(x, y)` | M3 | Lens settings (`debug: true` shows CoC as a heat map); the expected CoC at a point |
@@ -575,4 +614,4 @@ with `document.elementFromPoint` or real drags.
 24. Do visitors get the 3D view in production, and on phones? Today the C key opens it for anyone.
 25. Do the docs live on useblume.dev or under gui.style, and which generator builds them?
 26. Set up a Cloudflare project for preview deploys in M0 (the account's owner runs `wrangler login`), or test phones
-    through a tunnel to the dev server until M8?
+    through a tunnel to the dev server until M8? Deferred on 2026-10-29: phones are out of scope for now.

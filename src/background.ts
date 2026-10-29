@@ -3,6 +3,10 @@
 // shader prints onto the page only where it is seen through the goo.
 
 export type Theme = 'light' | 'dark';
+/** The page art, or a test art (?art=): `flat` is one solid colour, `bars` black and white bars 32 px wide. */
+export type PageArt = 'default' | 'flat' | 'bars';
+/** Width of each test bar (CSS px): wider than the blur M3 measures, so every edge reaches full contrast. */
+const BAR = 32;
 
 interface Field {
   x: number;
@@ -58,7 +62,10 @@ function grainTile(amount: number): HTMLCanvasElement {
   return tile;
 }
 
-export function paintPage(canvas: HTMLCanvasElement, opts: { width: number; height: number; scale: number; theme: Theme }) {
+export function paintPage(
+  canvas: HTMLCanvasElement,
+  opts: { width: number; height: number; scale: number; theme: Theme; art?: PageArt },
+) {
   const { width, height, scale, theme } = opts;
   const art = ART[theme];
   canvas.width = Math.max(1, Math.round(width * scale));
@@ -66,6 +73,20 @@ export function paintPage(canvas: HTMLCanvasElement, opts: { width: number; heig
   const ctx = canvas.getContext('2d', { alpha: false });
   if (!ctx) throw new Error('2D canvas unavailable');
   ctx.setTransform(scale, 0, 0, scale, 0, 0);
+
+  // Test arts are exact and grain-free: the same at every scroll offset (flat), or hard edges to measure (bars).
+  if (opts.art === 'flat') {
+    ctx.fillStyle = art.ground[0];
+    ctx.fillRect(0, 0, width, height);
+    return;
+  }
+  if (opts.art === 'bars') {
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = '#000';
+    for (let x = 0; x < width; x += 2 * BAR) ctx.fillRect(x, 0, BAR, height);
+    return;
+  }
 
   const ground = ctx.createLinearGradient(0, 0, 0, height);
   ground.addColorStop(0, art.ground[0]);

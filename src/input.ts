@@ -13,8 +13,16 @@ export interface InputHooks {
   /** Rest-surface height (CSS px) at a goo-space point. */
   surfaceAt: (x: number, y: number) => number;
   now: () => number;
+  /** True while `now` is the dev harness's virtual clock: events take their times from it, not from e.timeStamp. */
+  virtualClock?: () => boolean;
   /** Called whenever input should wake the render loop. */
   wake: () => void;
+}
+
+export interface Input {
+  /** Forgets held pointers and keys and the last press and release (the dev harness's seeded runs start clean). */
+  reset: () => void;
+  detach: () => void;
 }
 
 /** Default fingertip semi-axes (CSS px) by contact kind; a pen tip is small and leaves no ridges. */
@@ -36,7 +44,7 @@ const eventTime = (e: Event, now: number) => {
   return Math.abs(t - now) < 0.1 ? Math.min(t, now) : now;
 };
 
-export function attachInput(hooks: InputHooks): () => void {
+export function attachInput(hooks: InputHooks): Input {
   const { tracker } = hooks;
   const held = new Map<number, { id: number; kind: ContactKind; x0: number; y0: number; dragged: boolean }>();
   const keyHeld = new Map<HTMLElement, number>();
@@ -45,6 +53,7 @@ export function attachInput(hooks: InputHooks): () => void {
   const ac = new AbortController();
   const on = { signal: ac.signal };
   const passive = { signal: ac.signal, passive: true };
+  const timeOf = (e: Event) => (hooks.virtualClock?.() ? hooks.now() : eventTime(e, hooks.now()));
 
   const press = (kind: ContactKind, x: number, y: number, size: [number, number], depthScale: number, t: number) => {
     const id = tracker.press(kind, x, y, {
@@ -85,7 +94,7 @@ export function attachInput(hooks: InputHooks): () => void {
         // Only pens report real pressure; mice report 0.5 by spec and many touchscreens report noise.
         const depthScale = kind === 'pen' && e.pressure > 0 ? 0.55 + 0.9 * e.pressure : 1;
         const p = hooks.toGoo(e.clientX, e.clientY);
-        const t = eventTime(e, hooks.now());
+        const t = timeOf(e);
         const prev = held.get(e.pointerId);
         if (prev) tracker.release(prev.id, t);
         held.set(e.pointerId, { id: press(kind, p.x, p.y, size, depthScale, t), kind, x0: e.clientX, y0: e.clientY, dragged: false });
@@ -100,7 +109,7 @@ export function attachInput(hooks: InputHooks): () => void {
         if ((e.key !== 'Enter' && e.key !== ' ') || e.repeat || e.altKey || e.ctrlKey || e.metaKey) return;
         const c = hooks.centerOf(button);
         if (!c || keyHeld.has(button)) return;
-        const t = eventTime(e, hooks.now());
+        const t = timeOf(e);
         keyHeld.set(button, press('virtual', c.x + (Math.random() - 0.5) * 6, c.y + (Math.random() - 0.5) * 6, AXES.virtual, 1, t));
       },
       on,
@@ -113,7 +122,7 @@ export function attachInput(hooks: InputHooks): () => void {
       lastReleaseAt = t;
       hooks.wake();
     };
-    button.addEventListener('keyup', (e) => (e.key === 'Enter' || e.key === ' ') && keyUp(eventTime(e, hooks.now())), on);
+    button.addEventListener('keyup', (e) => (e.key === 'Enter' || e.key === ' ') && keyUp(timeOf(e)), on);
     button.addEventListener('blur', () => keyUp(hooks.now()), on);
 
     // Screen readers, Voice Control and el.click() activate without any press: give them a dent too.
@@ -160,7 +169,7 @@ export function attachInput(hooks: InputHooks): () => void {
     const h = held.get(e.pointerId);
     if (!h) return;
     held.delete(e.pointerId);
-    const t = eventTime(e, hooks.now());
+    const t = timeOf(e);
     tracker.release(h.id, t);
     lastReleaseAt = t;
     if (h.kind === 'mouse' && h.dragged) lastMouseDragAt = t;
@@ -194,5 +203,13 @@ export function attachInput(hooks: InputHooks): () => void {
   window.addEventListener('blur', releaseAll, on);
   document.addEventListener('visibilitychange', () => document.hidden && releaseAll(), on);
 
-  return () => ac.abort();
+  return {
+    reset() {
+      held.clear();
+      keyHeld.clear();
+      lastReleaseAt = -1e9;
+      lastMouseDragAt = -1e9;
+    },
+    detach: () => ac.abort(),
+  };
 }

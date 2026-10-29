@@ -135,6 +135,8 @@ nothing.
 | File | What it does |
 |---|---|
 | `src/main.ts` | Bootstrap, device bring-up and loss recovery, frame loop and sleep, dev harness |
+| `src/harness.ts` | The dev harness's seeded generator, frame diffs and simulation statistics |
+| `src/perf.ts`, `src/gpu/timing.ts` | The `?perf` overlay (loaded on demand); GPU timestamps around each renderer's passes |
 | `src/input.ts`, `src/touches.ts` | Pointer, keyboard and assistive-tech input; fingertip contacts |
 | `src/layout.ts` | Goo-space geometry; CPU copy of the SDF |
 | `src/background.ts` | Page art and the label mask |
@@ -166,7 +168,17 @@ __goo.realtime();                   // back to requestAnimationFrame
 
 __goo.sag();                        // what the material does under gravity: regime, sag numbers, settle phase
 await __goo.readSim();              // per-cell copies of the simulation state (e, v, m, age, settled shape ms)
+
+__goo.seed(1); __goo.resetClock(); __goo.snap();   // runs that repeat: the same inputs then give the same frames
+__goo.diff(held, after);            // { mean, max, over1 } in 8-bit units between two frame copies
+await __goo.sim.stats();            // the putty's volume, its centroid and the range of m
+__goo.glass();                      // the glass uniforms the last frame wrote
 ```
+
+Test pages, in any build: `?art=flat` or `?art=bars` swaps the page art for a solid colour or black and white
+bars, and `?tall=N&at=M` makes the page N px taller than the window, with M px of that above the content. `?perf`
+shows an overlay with the frame interval, JavaScript and GPU times (where the GPU has timestamp queries) and
+resident memory.
 
 Vector math in shader code uses `.add()` / `.mul()` / `std.*` rather than operators, because operator overloading
 needs the `tsover` TypeScript fork.

@@ -188,6 +188,9 @@ export function createSceneHost(deps: SceneHostDeps) {
         out.width = copy.width;
         out.height = copy.height;
         out.getContext('2d')?.drawImage(copy, 0, 0);
+        // Where it sat on screen (viewport CSS px), so __goo.diff can line it up with a goo frame at another scale.
+        const r = document.querySelector('.scene-canvas')?.getBoundingClientRect();
+        out.dataset.box = (r ? [r.left, r.top, r.width, r.height] : [0, 0, window.innerWidth, window.innerHeight]).join(',');
         return out;
       },
       /** Lays scene shots out side by side, `width` CSS px each, over the page (call again with [] to clear). */

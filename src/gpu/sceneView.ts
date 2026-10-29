@@ -6,6 +6,7 @@ import { common, d, type TgpuRoot } from 'typegpu';
 import type { GlassInput, Goo } from './goo.ts';
 import { renderLayout } from './renderShader.ts';
 import { GlassParams } from './schemas.ts';
+import { frameSpan } from './timing.ts';
 import {
   Dot,
   dotFragment,
@@ -132,31 +133,33 @@ export function createSceneView(root: TgpuRoot, canvas: HTMLCanvasElement, goo: 
     segmentBuffer.write(segments);
     dotBuffer.write(dots);
 
+    // Timed only under ?perf (gpu/timing.ts): from the start of the scene pass to the end of the last gizmo pass.
+    const span = frameSpan('scene');
+    const last = dotCount > 0 ? 'dots' : segCount > 0 ? 'lines' : 'scene';
     const encoder = root['~unstable'].createCommandEncoder();
-    scenePipe
+    let sceneDraw = scenePipe
       .with(encoder)
       .with(renderGroup)
       .with(sceneGroup)
       .withColorAttachment({
         color: { view: context, clearValue: [0, 0, 0, 1] },
         depth: { view: depth, clearValue: [1e9, 0, 0, 0] },
-      })
-      .draw(3);
+      });
+    if (span) sceneDraw = sceneDraw.withTimestampWrites(span.writes(true, last === 'scene'));
+    sceneDraw.draw(3);
     if (segCount > 0) {
-      linePipe
-        .with(encoder)
-        .with(gizmoGroup)
-        .withColorAttachment({ view: context, loadOp: 'load' })
-        .draw(6, segCount);
+      let lineDraw = linePipe.with(encoder).with(gizmoGroup).withColorAttachment({ view: context, loadOp: 'load' });
+      if (span && last === 'lines') lineDraw = lineDraw.withTimestampWrites(span.writes(false, true));
+      lineDraw.draw(6, segCount);
     }
     if (dotCount > 0) {
-      dotPipe
-        .with(encoder)
-        .with(gizmoGroup)
-        .withColorAttachment({ view: context, loadOp: 'load' })
-        .draw(6, dotCount);
+      let dotDraw = dotPipe.with(encoder).with(gizmoGroup).withColorAttachment({ view: context, loadOp: 'load' });
+      if (span) dotDraw = dotDraw.withTimestampWrites(span.writes(false, true));
+      dotDraw.draw(6, dotCount);
     }
+    span?.resolve(root.unwrap(encoder));
     encoder.submit();
+    span?.collect();
     return true;
   }
 

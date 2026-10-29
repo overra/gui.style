@@ -120,6 +120,14 @@ export class FingerTracker {
     for (const id of this.fingers.keys()) this.release(id, now);
   }
 
+  /** Forgets every contact and restarts the print seeds from `Math.random` (the dev harness seeds it first). */
+  reset(): void {
+    this.fingers.clear();
+    this.nextId = 1;
+    this.seedCounter = Math.random() * 1000;
+    this.lastPressAt = -1e9;
+  }
+
   /** Goo space moved under the contacts (the canvas grew or shrank around the goo): keep each on its spot. */
   shift(dx: number, dy: number): void {
     for (const f of this.fingers.values()) {

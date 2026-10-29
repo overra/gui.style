@@ -84,7 +84,9 @@ nothing there.
 
 Normal mode never creates the scene canvas or loads its code (a lazy chunk of about 72 KB; lil-gui comes in a
 chunk shared with the tuning panel). The scene canvas is capped at about 3.2 MP of device pixels. On the M-series
-GPU this was tested on, orbiting with the html-in-canvas UI ran at the display's 120 Hz (median 8.3 ms frames).
+GPU this was tested on, orbiting with the html-in-canvas UI ran at the display's 120 Hz (median 8.3 ms frames). At
+3.2 MP the scene pass takes 1.2 to 3.1 ms of GPU time (median), depending on the view, and the frame 3.1 to 3.5 ms
+of JavaScript (`?perf`, on an M3 Max; see the roadmap's [budgets](roadmap.md#budgets-proposal-desktop-measured-in-m0)).
 
 The 3D view is a ray tracer, not a mesh renderer. The goo is a height field, and the page, probes and emitters are
 analytic. So one full-screen pass can reuse the flat shader's surface (`surfaceAt`: analytic rest profile, B-spline
@@ -222,9 +224,13 @@ the view turns off the camera's axis (`overlay`, 0 → 1 between 0.5° and 12°)
 render; reflections still see them. Only HDR content (glass, emitters, probes) goes through the flat shader's
 highlight shoulder, never the page.
 
-Measured over the goo canvas region, the first 3D frame differs from normal mode by 0.93/255 on average. The rest
-is the glass silhouette rim: perspective vs orthographic refraction and per-pixel coverage. The 0.2 s cross-fade
-hides it.
+Measured with `__goo.diff` in M0 (2026-10-29, a 1440 × 900 window at DPR 2), a 3D frame at the camera pose differs
+from normal mode by a mean of 0.76/255 over the goo canvas in the light theme, and 1.05 in the dark. It was 0.93
+before the levitating button and the upright page. The differences sit on the glass silhouette rim (perspective vs
+orthographic refraction, and per-pixel coverage) and on the edges of the printed label, which the two paths sample
+at different scales (2 and 1.57 device px per CSS px); the largest is 38 (70 in the dark). About half of the mean is
+the page grain, resampled at those two scales: on `?art=flat` the mean is 0.37, and beside the button, where only the
+page and the shadow show, it is 0.08. The 0.2 s cross-fade hides it.
 
 ## Lights and materials
 
@@ -619,10 +625,28 @@ __goo.scene.scene.gravity.splice(0, 3, 0, 0, -1); __goo.scene.changed()   // gra
 __goo.sag()                       // the last frame's check: regime, S, Sedge, K, the face drives, the settle phase
 await __goo.readSim()             // per-cell copies: e, v, m, age, the settled shape ms, the rest profile
 __goo.eff(); __goo.snap(); __goo.resetClock(1000)   // effective params; snap to rest; restart the virtual clock
+
+// M0: runs that repeat, and comparisons
+__goo.seed(1); __goo.resetClock(); __goo.snap()   // seeded grain and fingers; then the same inputs give the same frames
+__goo.diff(a, b)                  // { mean, max, over1 } between frame copies (drive(), scene.shot()), lined up on screen
+await __goo.sim.stats()           // volume Σ(rest + m)·cell², resting volume, centroid (page px), range of m
+__goo.glass()                     // the glass uniforms the last frame wrote, after the scene hook
+__goo.perf()                      // with ?perf: frame interval, JavaScript and GPU times, resident MiB
+
+// the 3D path against normal mode at the camera pose (0.76/255 mean over the goo canvas, light theme)
+__goo.seed(1); __goo.resetClock(); __goo.snap()
+const flat = __goo.drive(100)
+await __goo.scene.enter(); const cam = __goo.scene.config().dev; cam.setPose(cam.cameraPose())
+__goo.diff(flat, __goo.scene.shot(100))
 ```
 
 `drive()` runs faster than real time, so the settle layer's readbacks lag behind it: await a few ms between chunks
-(`for (...) { __goo.drive(500); await new Promise((r) => setTimeout(r, 40)); }`) to see it reach `settled`.
+(`for (...) { __goo.drive(500); await new Promise((r) => setTimeout(r, 40)); }`) to see it reach `settled`. The same
+goes for `?perf`'s GPU timestamps: drive one frame per task to time every frame.
+
+Test pages: `?art=flat` (one solid colour) and `?art=bars` (black and white bars, 32 px), both without grain, and
+`?tall=N&at=M`, a page N px taller than the window with M px of that above `.stage`. The 3D view doesn't handle a
+tall page yet (M2).
 
 ## Limitations
 

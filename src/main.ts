@@ -1,12 +1,14 @@
 import { tgpu } from 'typegpu';
-import { paintLabel, paintPage, type Theme } from './background.ts';
+import { paintLabel, paintPage, type PageArt, type Theme } from './background.ts';
 import { effectiveParams } from './feel.ts';
 import { createGoo, type Goo } from './gpu/goo.ts';
+import { diffFrames, seededRandom, simStats, tagBox } from './harness.ts';
 import { attachInput } from './input.ts';
 import { measureLayout, type Layout } from './layout.ts';
 import { createLevitation } from './levitation.ts';
 import { looks } from './look.ts';
 import { params } from './params.ts';
+import type { Perf } from './perf.ts';
 import { createSceneHost } from './scene/host.ts';
 import { FingerTracker } from './touches.ts';
 import type { Tuning } from './tuning.ts';
@@ -32,6 +34,21 @@ const theme = (): Theme => (darkQuery.matches ? 'dark' : 'light');
 let virtualNow: number | null = null;
 const clock = () => virtualNow ?? performance.now() / 1000;
 
+const query = new URLSearchParams(location.search);
+// Test pages: ?art=flat or ?art=bars paints a test art; ?tall=N&at=M makes the page N px taller than the window,
+// with M px of the extra above .stage and the rest below it.
+const artQuery = query.get('art');
+const pageArt: PageArt = artQuery === 'flat' || artQuery === 'bars' ? artQuery : 'default';
+const tall = Math.max(Number(query.get('tall')) || 0, 0);
+if (tall > 0) {
+  const above = Math.min(Math.max(Number(query.get('at')) || 0, 0), tall);
+  document.body.style.paddingTop = `${above}px`;
+  document.body.style.paddingBottom = `${tall - above}px`;
+}
+// ?perf: frame, CPU and GPU times and resident memory, in any build (perf.ts loads only when asked for).
+const perfLoad = query.has('perf') ? import('./perf.ts').then(({ createPerf }) => createPerf()) : null;
+let perf: Perf | null = null;
+
 // ---- page background (always a plain 2D canvas, with or without WebGPU) ----
 // It is painted at its own CSS box, and the glass maps into that same box, so what is refracted always lines up
 // with what is around it (mobile toolbars, pinch-zoom and scrolling included).
@@ -39,7 +56,7 @@ const pageScale = () => Math.min(window.devicePixelRatio || 1, MAX_DPR);
 const pageBox = () => pageBg.getBoundingClientRect();
 function repaintPage() {
   const { width, height } = pageBox();
-  paintPage(pageBg, { width, height, scale: pageScale(), theme: theme() });
+  paintPage(pageBg, { width, height, scale: pageScale(), theme: theme(), art: pageArt });
 }
 repaintPage();
 
@@ -67,12 +84,14 @@ function explain(reason: string, message: string | null = NO_WEBGPU) {
   }
 }
 
-async function requestDevice(): Promise<GPUDevice | null> {
+/** `optional` features are asked for only where the adapter has them (?perf's timestamp queries; normally none). */
+async function requestDevice(optional: GPUFeatureName[] = []): Promise<GPUDevice | null> {
   if (!window.isSecureContext || !('gpu' in navigator)) return null;
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'low-power' }).catch(() => null);
   // A software adapter would run the glass at single-digit frame rates.
   if (!adapter || (adapter.info as GPUAdapterInfo & { isFallbackAdapter?: boolean }).isFallbackAdapter) return null;
-  return adapter.requestDevice({ label: 'goo' }).catch(() => null);
+  const requiredFeatures = optional.filter((f) => adapter.features.has(f));
+  return adapter.requestDevice(requiredFeatures.length ? { label: 'goo', requiredFeatures } : { label: 'goo' }).catch(() => null);
 }
 
 // ---- the live goo ----
@@ -165,6 +184,7 @@ let quietSince = clock();
 const frame = (ms: number) => {
   rafId = 0;
   if (!goo || !layout) return;
+  const cpuStart = perf ? performance.now() : 0;
   // Resize for the shadow before drawing: a resize after drawing would throw this frame away (the button blinks out).
   if (syncBleed()) {
     relayout();
@@ -198,6 +218,7 @@ const frame = (ms: number) => {
   goo.frame({ now, dt, tracker, reducedMotion, sinceIntro: now - droppedAt, eff, gravity });
   sceneHost.frame(now);
   tracker.endFrame();
+  perf?.frame(ms, performance.now() - cpuStart, virtualNow !== null, sleeping);
   afterFrame?.();
   afterFrame = null;
 
@@ -216,7 +237,7 @@ const redraw = () => {
   if (!rafId && virtualNow === null) rafId = requestAnimationFrame(frame);
 };
 
-attachInput({
+const input = attachInput({
   tracker,
   buttons,
   toGoo: (x, y) => {
@@ -229,6 +250,7 @@ attachInput({
   },
   surfaceAt: (x, y) => goo?.surfaceAt(x, y) ?? 0,
   now: clock,
+  virtualClock: () => virtualNow !== null,
   wake,
 });
 
@@ -253,8 +275,11 @@ let losses: number[] = [];
 
 async function start() {
   if (forcedColors.matches) return explain('forced colors are active', null);
-  const device = await requestDevice();
+  if (perfLoad) perf = await perfLoad.catch(() => null);
+  const device = await requestDevice(perf?.features);
   if (!device) return explain('no WebGPU adapter');
+  // Before TypeGPU creates anything, so the overlay counts every texture and buffer.
+  perf?.attach(device);
 
   void device.lost.then((info) => {
     gooWrap.classList.remove('is-live');
@@ -345,7 +370,7 @@ async function toggleTuning(open = !guiOpen) {
   }
 }
 tweak?.addEventListener('click', () => void toggleTuning());
-if (new URLSearchParams(location.search).has('tune')) void toggleTuning(true);
+if (query.has('tune')) void toggleTuning(true);
 
 // Resizing a canvas clears it, so every size change redraws.
 const onViewport = () => {
@@ -396,6 +421,7 @@ if (import.meta.env.DEV) {
   //   __goo.press(fx, fy) / move / release → synthetic touches at a fraction of the button's box
   //   __goo.realtime()         → back to requestAnimationFrame
   //   __goo.params / __goo.looks → live tunables
+  //   __goo.seed(n), resetClock(), snap() → runs that repeat exactly; __goo.diff(a, b) compares their frames
   const copyFrame = () => {
     const out = document.createElement('canvas');
     out.width = gooCanvas.width;
@@ -403,9 +429,11 @@ if (import.meta.env.DEV) {
     const ctx = out.getContext('2d');
     ctx?.drawImage(pageBg, ...captureSource(), 0, 0, out.width, out.height);
     ctx?.drawImage(gooCanvas, 0, 0);
-    return out;
+    // Where it sat on screen, so __goo.diff can line it up with a scene shot at another scale.
+    return tagBox(out, gooCanvas.getBoundingClientRect());
   };
   let synthetic = 900;
+  const browserRandom = Math.random;
   Object.assign(window, {
     __goo: {
       params,
@@ -450,12 +478,48 @@ if (import.meta.env.DEV) {
       sag: () => (goo ? { ...goo.sag, phase: goo.settlePhase } : null),
       /** Copies of the simulation state: e, v, m, age and the settled shape ms, per cell (Float32Arrays). */
       readSim: () => goo?.readState() ?? Promise.resolve(null),
+      sim: {
+        /**
+         * Volume Σ(rest + m)·cell² and the resting volume (CSS px³), the volume's centroid (page CSS px) and the
+         * range of m, from a readSim() copy. `element` picks a [data-goo] element's simulation (today they share one).
+         */
+        async stats(element: HTMLElement = buttons[0]) {
+          if (!buttons.includes(element)) return null;
+          const at = layout;
+          const s = await goo?.readState();
+          return s && at ? simStats(s, at.cell, [at.canvasX, at.canvasY]) : null;
+        },
+      },
+      /** The glass uniforms the last frame wrote, after the scene hook, as plain numbers and arrays. */
+      glass: () => (goo?.writtenGlass ? JSON.parse(JSON.stringify(goo.writtenGlass)) : null),
+      /**
+       * Seeds Math.random (the page grain, finger angles, tap jitter; null restores the browser's), repaints and
+       * re-uploads the page, then restarts the tracker's print seeds and forgets held input. On the virtual clock,
+       * input takes its event times from that clock. Identical runs: seed(n); resetClock(); snap() (or drop()).
+       */
+      seed(n: number | null = 1) {
+        Math.random = n === null ? browserRandom : seededRandom(n);
+        refreshPage();
+        tracker.reset();
+        input.reset();
+        redraw();
+      },
+      /**
+       * { mean, max, over1 } in 8-bit units between two frame copies (drive(), scene.shot()) over `rect`, viewport
+       * CSS px [x, y, w, h], by default where both are; copies at different scales are resampled to CSS px first.
+       */
+      diff: (a: HTMLCanvasElement, b: HTMLCanvasElement, rect?: [number, number, number, number]) => diffFrames(a, b, rect),
+      /** The ?perf overlay's figures (frame, CPU and GPU times, memory), or null without ?perf. */
+      perf: () => perf?.stats() ?? null,
       /** Straight to the resting state (molded or settled), as when the loop sleeps. */
       snap() {
         goo?.snapToRest();
         levitation.reset();
       },
-      /** Restart the virtual clock at t (s) and forget the intro (drop() replays it), for runs that must match. */
+      /**
+       * Restart the virtual clock at t (s), with the substeps from a fresh phase, and forget the intro (drop() replays
+       * it), for runs that must match.
+       */
       resetClock(t = 1000) {
         cancelAnimationFrame(rafId);
         rafId = 0;
@@ -463,6 +527,7 @@ if (import.meta.env.DEV) {
         lastFrame = 0;
         quietSince = t;
         droppedAt = t - 1e3;
+        goo?.resetPhase();
       },
       /** `crop` is [x, y, w, h] in goo-space CSS px (the canvas extends --goo-m past the button). */
       show(frames: HTMLCanvasElement[], zoom = 2, cols = 2, crop?: [number, number, number, number]) {

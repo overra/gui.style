@@ -11,6 +11,7 @@ import type { FingerTracker } from '../touches.ts';
 import { detailKernel, detailLayout, detailPackKernel, detailPackLayout } from './detailKernels.ts';
 import { gooFragment, LabelParams, renderLayout } from './renderShader.ts';
 import { DetailParams, Finger, GlassParams, MAX_FINGERS, MAX_SHAPES, Shape, SimParams } from './schemas.ts';
+import { frameSpan } from './timing.ts';
 import {
   applyKernel,
   applyLayout,
@@ -197,6 +198,8 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
   // Scene hooks (src/scene): the scene's lights and camera rewrite the glass uniforms; the 3D view shares textures.
   let glassHook: ((values: GlassInput, theme: Theme) => GlassInput) | null = null;
   let lastGlass: GlassInput | null = null;
+  /** What the glass uniform last received: lastGlass after the scene hook. */
+  let writtenGlass: GlassInput | null = null;
   let resourceVersion = 0;
   const glow = { x: 0, y: 0, amount: 0, radius: 20 };
 
@@ -836,7 +839,8 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
       })),
     };
     lastGlass = values;
-    glassUniform.write(glassHook ? glassHook(values, theme) : values);
+    writtenGlass = glassHook ? glassHook(values, theme) : values;
+    glassUniform.write(writtenGlass);
   }
 
   function frame({ dt, tracker, reducedMotion, sinceIntro, now, eff, gravity }: FrameInput) {
@@ -973,8 +977,10 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
     });
     writeGlass(setF, eff.visual);
 
+    // Timed only under ?perf (gpu/timing.ts): from the start of the compute pass to the end of the render pass.
+    const span = frameSpan('goo');
     const encoder = root['~unstable'].createCommandEncoder();
-    const pass = encoder.beginComputePass();
+    const pass = encoder.beginComputePass(span ? { timestampWrites: span.writes(true, false) } : undefined);
     const wx = Math.ceil(sim.cols / WG);
     const wy = Math.ceil(sim.rows / WG);
     const ghostElastic = remolding ? bound.ghost.elasticRemold : bound.ghost.elastic;
@@ -999,12 +1005,14 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
     pass.end();
     detailFlip ^= 1;
 
-    renderPipe
+    const draw = renderPipe
       .with(encoder)
       .with(renderGroup)
-      .withColorAttachment({ view: context, clearValue: [0, 0, 0, 0] })
-      .draw(3);
+      .withColorAttachment({ view: context, clearValue: [0, 0, 0, 0] });
+    (span ? draw.withTimestampWrites(span.writes(false, true)) : draw).draw(3);
+    span?.resolve(root.unwrap(encoder));
     encoder.submit();
+    span?.collect();
     // Every 30 frames (half a second at 60 Hz) while settling: read the settled shape back (CPU copy, quiet test).
     if (settlePhase === 'settling' && ++settleFrames >= 30) {
       settleFrames = 0;
@@ -1017,6 +1025,11 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
   /** Compiles every pipeline up front (rejects if the device refuses one), instead of on the first frame. */
   async function ready() {
     await Promise.all([...Object.values(pipes), renderPipe].map((p) => p.initAsync()));
+  }
+
+  /** Restarts the substep phase, so harness runs from the same clock take the same substeps (replayDrop does too). */
+  function resetPhase() {
+    accumulator = 0;
   }
 
 
@@ -1054,9 +1067,14 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
     setViewport,
     replayDrop,
     snapToRest,
+    resetPhase,
     surfaceAt,
     settledAt,
     readState,
+    /** The glass uniforms the last frame wrote, after the scene hook (the dev harness's __goo.glass()). */
+    get writtenGlass() {
+      return writtenGlass;
+    },
     /** The last frame's sag check under the current gravity and material (regime, S, Sedge, K, drives). */
     get sag() {
       return sag;
