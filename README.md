@@ -3,6 +3,10 @@
 Experiments in interface elements as physical objects: real materials, lit by the scene they live in, placed in 3D
 space.
 
+The direction is "Blender meets Figma": a browser-based 3D workspace for designing websites, with TypeGPU and
+related tools powering the rendering and simulation. Pages, interface elements, materials, world lights and the
+website's camera are parts of the scene you design. The 3D view is the beginning of that workspace.
+
 The first one is **Liquid Glass Goo**, a WebGPU button made of glassy putty, built with [TypeGPU](https://typegpu.com)
 and `@typegpu/sdf`.
 
@@ -81,6 +85,44 @@ With html-in-canvas (Chrome 157 and later) the page UI is drawn into the scene a
 transform carries the live DOM along. Design notes are in `docs/3d-config-view.md`; what comes next is in
 `docs/roadmap.md`.
 
+## The shared scene document
+
+The editor and agents edit the same versioned scene document. It owns the camera, gravity, page art, goo element,
+world lights and named materials. Version 1 supports the current single page, art layer and goo element, one sun
+and up to three softboxes. The DOM still owns the page's content and semantics.
+
+Lights have stable ids and world positions. A new default rig is placed once, after the first layout, around the
+unlifted button; moving the page, changing the camera or hovering the button then leaves the lights in place.
+Imported documents keep their saved world positions. The glass still samples each light from the goo center;
+per-pixel positional lighting remains later work.
+
+The 3D panel's **Scene document** folder exports and imports JSON and offers undo and redo. The same API is
+available in every build as `window.guiStyle.scene`, and in development as `__goo.scene`:
+
+```js
+const scene = window.guiStyle.scene;
+await scene.ready;                         // initial layout and default light placement
+const before = scene.export();             // independent object; JSON.stringify it to save a file
+scene.edit({ id: 'goo', changes: { hover: 40 } }, { expectedRevision: scene.revision });
+scene.edit([
+  { id: 'sun', changes: { position: [-300, -500, 900] } },
+  { id: 'glass-putty', changes: { params: { feel: { viscosity: 0.7 } } } },
+]);                                        // one validated edit and undo step
+scene.undo();
+scene.redo();
+scene.load(before);                         // also accepts a JSON string
+scene.validate(before);                     // [] when valid; otherwise path/message issues
+```
+
+Accepted edits save automatically in this browser under `gui.style.scene.v1` and restore on reload. `save()`
+retries saving; `saved` and `storageError` report the result. `clearSaved()` removes the saved copy while keeping
+the live scene; `reset()` restores the current layout's default scene. Unknown fields, unsupported versions and
+invalid references are rejected before the live scene changes. There is no older shipped format to migrate.
+
+Materials carry their own physics parameters and light/dark optics. Elements reference them by id, and both
+panels edit the active material. Changes to its shape or simulation grid rebuild the affected resources and
+reset transient simulation state; dents, fingerprints and GPU buffers are not part of the document.
+
 ## How it works
 
 The page background is a 2D canvas. The goo is drawn by a separate, transparent WebGPU canvas that overlays the
@@ -140,13 +182,14 @@ nothing.
 | `src/input.ts`, `src/touches.ts` | Pointer, keyboard and assistive-tech input; fingertip contacts |
 | `src/layout.ts` | Goo-space geometry; CPU copy of the SDF |
 | `src/background.ts` | Page art and the label mask |
-| `src/params.ts`, `src/look.ts` | Physics tunables; light and dark optics |
+| `src/params.ts`, `src/materials.ts`, `src/look.ts` | Physics defaults; named material data and light/dark optics; environment and light defaults |
 | `src/gpu/goo.ts` | Textures, bind groups, uniforms, per-frame encoding |
 | `src/gpu/simKernels.ts` | Putty simulation |
 | `src/gpu/detailKernels.ts` | Fingerprint layer |
 | `src/gpu/renderShader.ts` | Liquid-glass shading |
 | `src/levitation.ts` | The floating button's rigid-body motion (air-cushion spring) |
 | `src/scene/scene.ts`, `src/scene/math.ts` | Scene model (camera, page plane, lights, the goo's frame); vector helpers |
+| `src/scene/document.ts` | Versioned document, validation, edits by id, history and browser persistence |
 | `src/scene/host.ts` | Feeds the scene to the glass in normal mode; loads the 3D view on demand |
 | `src/scene/configMode.ts`, `src/scene/htmlInCanvas.ts` | The 3D view: orbit camera, gizmos, panel, picking; page UI via html-in-canvas |
 | `src/gpu/sceneView.ts`, `src/gpu/sceneShaders.ts` | Ray-traces the 3D view |

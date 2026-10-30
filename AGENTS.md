@@ -4,6 +4,9 @@ gui.style is a set of experiments in interface elements as physical objects: rea
 live in, placed in 3D space. The first is **Liquid Glass Goo**, a WebGPU button made of glassy putty (TypeGPU), with a
 ray-traced 3D view of the scene behind the page (press C). The repo is public: github.com/overra/gui.style.
 
+The direction is "Blender meets Figma": a browser-based 3D workspace for designing websites, with TypeGPU and
+related tools powering rendering and simulation. The 3D view is the beginning of that authoring workspace.
+
 Read these first:
 
 - `README.md`: what it does, the putty physics, the glass, and a table of every source file.
@@ -20,9 +23,15 @@ Read these first:
     by default) pulls on it, and a settle layer finds a sag;
   - the roadmap;
   - M0, the harness safety net.
-- **Next is M1**, the scene document and materials as data (see `docs/roadmap.md`). Q9 (are lights anchored to the
-  world, pages or elements?) shapes it. Don't settle open questions silently: ask the user, or build the roadmap's
-  proposal and say so.
+- **Landed on `main`:** M1's shared versioned scene document, edits by id, undo/redo, JSON
+  import/export, browser persistence, named material records and world-space lights. See `docs/roadmap.md` for
+  verification results. The compact text grammar and page-authoring choice (Q11) remain open.
+- **Decided and implemented (2026-10-29):** lights live in the world (Q9). A new default rig is placed once after
+  the first layout; imported positions are preserved. Moving pages, elements or the camera leaves lights in place.
+- **Next after M1 is M2**, camera height and tall pages (see `docs/roadmap.md`). Don't settle remaining open
+  questions silently: ask the user, or build the roadmap's proposal and say so.
+- **Research for M1:** Brilliant's Blueprint suggests a shared design model edited visually and through text by
+  agents. See the roadmap's research proposal; the text grammar and page-authoring choice (Q11) remain open.
 
 ## Commands
 
@@ -30,10 +39,12 @@ Read these first:
 npm install
 npm run dev          # Vite dev server; for a second server, `npx vite --port 5185 --strictPort`
 npm run typecheck    # tsc --noEmit
+npm test             # native Node document/material tests
 npm run build        # typecheck + production build; must pass before a commit
 ```
 
-There's no unit-test suite. Changes are verified in the browser with the dev harness (below).
+Pure document and material behavior has a native Node test suite. GPU behavior is verified in the browser with
+the dev harness (below).
 
 ## Code conventions
 
@@ -50,6 +61,8 @@ There's no unit-test suite. Changes are verified in the browser with the dev har
     the screen, and the page plane sits at z = −depth.
   - World up is (0, −1, 0). The glass, its studio, the goo's frame and the levitation gap stay page-relative,
     with z as the page's axis.
+  - Lights store world positions and emitter axes. Derive their appearance from the observation point; page,
+    camera and goo transforms never reparent or reinitialize them.
   - Say "in front of the page", not "above it".
 - **Normal mode** (the flat page plus the goo overlay) must not change unless that is the point. Check that
   `__goo.scene.identity()` is 0, and diff seeded frames before and after.
@@ -68,6 +81,11 @@ There's no unit-test suite. Changes are verified in the browser with the dev har
 - **M0.** `seed(n)`, then `resetClock()` and `snap()` or `drop()`, makes runs repeat exactly. `diff(a, b, rect)`
   compares two frames, `sim.stats()` reports volume and centroid, `glass()` returns the last glass uniforms, and
   `perf()` returns the `?perf` overlay's numbers.
+- **M1.** `window.guiStyle.scene` in every build, or `__goo.scene` in dev: await `ready`, then `export()`,
+  `load(docOrJson)`, `edit({ id, changes }, { expectedRevision })` (or a batch), `validate()`, `undo()` and `redo()`.
+  The `revision`, `saved`, `storageError`, `canUndo` and `canRedo` properties report state. `reset()` restores the
+  live defaults; `clearSaved()` removes browser persistence without changing the live scene. Accepted edits save
+  under `gui.style.scene.v1`. Reset the scene before default parity checks so a saved edit cannot affect them.
 - **URL parameters.**
   - test pages: `?art=flat|bars`, `?tall=N&at=M`;
   - overlays and panels: `?perf`, `?tune`, `?scene` (shows the 3D button);

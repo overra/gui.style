@@ -355,19 +355,19 @@ export function createGoo(root: TgpuRoot, canvas: HTMLCanvasElement) {
       };
     });
 
-  function setLayout(next: Layout, nextScale: number, drop: boolean) {
+  function setLayout(next: Layout, nextScale: number, drop: boolean, force = false) {
     scale = nextScale;
     // The canvas can move on the page (it grows around a floating button's shadow): the touch glow keeps its spot.
     if (layout) {
       glow.x += layout.canvasX - next.canvasX;
       glow.y += layout.canvasY - next.canvasY;
     }
-    if (!sameGrid(layout, next) || !sim) {
+    if (force || !sameGrid(layout, next) || !sim) {
       // A rebuilt grid starts at rest; a settled sag comes along (resampled), so the putty doesn't re-slump.
       // (A re-molding sag isn't carried: the new grid starts molded.)
       // The run goes on from its last read-back shape, at that shape's own clock.
       const carried =
-        layout && sim && (settlePhase === 'settling' || settlePhase === 'settled')
+        !force && layout && sim && (settlePhase === 'settling' || settlePhase === 'settled')
           ? { from: layout, field: settledField, key: settleKey, clock: settleReadAt, settled: settlePhase === 'settled' }
           : null;
       if (sim) {

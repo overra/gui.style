@@ -1,7 +1,9 @@
-// Optical look of the glass for each theme: refraction, tint, studio lighting, shadow and caustics.
+// Environment and initial light rig for each theme. Material optics live in materials.ts; composeLook joins
+// the two through live properties, so the renderer and legacy glass controls see the same authored values.
 // Screen frame: x right, y down, z toward the viewer; azimuths are atan2(y_down, x) in degrees.
 
 import type { Theme } from './background.ts';
+import { defaultMaterial, type Material, type MaterialOptics } from './materials.ts';
 
 export interface Softbox {
   /** Unit center direction, long axis, short axis (gnomonic frame). */
@@ -40,50 +42,21 @@ function softbox(
 const scale3 = (k: number, c: [number, number, number]): [number, number, number] => [k * c[0], k * c[1], k * c[2]];
 
 const shared = {
-  /** Apparent-depth lens term (CSS px): a small standoff that lets the steep wall lens without folding. */
-  depthLens: 4,
-  iorG: 1.5,
   /** Key light 33° above the goo and 25° to its left: 41° off the screen's axis, toward the top-left. */
   lightDir: [-0.35, -0.55, 0.76] as [number, number, number],
   lightColor: [3.0, 2.95, 2.85] as [number, number, number],
   sunRadius: 0.052,
-  roughness: 0.18,
-  hazeRoughness: 0.12,
-  rimLod: 0.3,
-  lodMax: 2.5,
   /** Reflections use a perspective eye this far in front of the viewport center, so flat glass shows a sheen. */
   eyeDist: 1400,
-  glintWidth: 1.1,
-  aoWidth: 1.5,
-  /** Faint cool body tint per CSS px of path; thin (pressed) goo looks clearer. */
-  absorb: [0.002, 0.0011, 0.0007] as [number, number, number],
-  filmEps: 0.35,
-  glowRadius: 28,
 };
 
-export const looks = {
+export const environments = {
   light: {
     ...shared,
-    iorR: 1.468,
-    iorB: 1.542,
-    saturation: 1.18,
-    lift: 0.03,
-    hazeLod: 1.0,
     skyZenith: [0.3, 0.31, 0.34] as [number, number, number],
     skyHorizon: [0.52, 0.54, 0.58] as [number, number, number],
     horizonGain: 1.0,
     groundGain: 0.9,
-    glint: 0.3,
-    glintOpposite: 0.55,
-    shadowReach: 7,
-    shadowSigma: 9,
-    shadowOpacity: 0.14,
-    aoOpacity: 0.2,
-    causticC: 0.16,
-    causticMin: 0.72,
-    causticMax: 1.32,
-    causticAdd: 0,
-    glowPeak: 0.08,
     softboxes: [
       softbox(16, -122, 0.3, 0.22, 0.08, 0.1, scale3(1.6, [1, 0.99, 0.97])), // front sheen
       softbox(52, -122, 0.42, 0.11, 0.05, 0.03, scale3(8, [1, 0.98, 0.95])), // key strip → top-left arc
@@ -92,26 +65,10 @@ export const looks = {
   },
   dark: {
     ...shared,
-    iorR: 1.46,
-    iorB: 1.552,
-    saturation: 1.3,
-    lift: 0.012,
-    hazeLod: 1.2,
     skyZenith: [0.05, 0.055, 0.065] as [number, number, number],
     skyHorizon: [0.1, 0.11, 0.13] as [number, number, number],
     horizonGain: 0.8,
     groundGain: 1.0,
-    glint: 0.5,
-    glintOpposite: 0.6,
-    shadowReach: 6,
-    shadowSigma: 10,
-    shadowOpacity: 0.42,
-    aoOpacity: 0.45,
-    causticC: 0.18,
-    causticMin: 0.7,
-    causticMax: 1.45,
-    causticAdd: 0.04,
-    glowPeak: 0.14,
     softboxes: [
       softbox(16, -122, 0.3, 0.22, 0.08, 0.1, scale3(0.3, [1, 0.99, 0.97])),
       softbox(52, -122, 0.42, 0.11, 0.05, 0.03, scale3(7, [1, 0.98, 0.95])),
@@ -120,4 +77,38 @@ export const looks = {
   },
 } satisfies Record<Theme, unknown>;
 
-export type Look = (typeof looks)['light'];
+export type EnvironmentLook = (typeof environments)['light'];
+export type Look = MaterialOptics & EnvironmentLook;
+
+const views = new WeakMap<Material, Partial<Record<Theme, Look>>>();
+
+/** A live view: material sliders write optics, while lighting and the studio retain their own defaults. */
+export function composeLook(material: Material, theme: Theme): Look {
+  let themes = views.get(material);
+  if (!themes) views.set(material, (themes = {}));
+  let view = themes[theme];
+  if (view) return view;
+  view = {} as Look;
+  for (const key of Object.keys(material.optics[theme])) {
+    Object.defineProperty(view, key, {
+      enumerable: true,
+      get: () => Reflect.get(material.optics[theme], key),
+      set: (value) => { Reflect.set(material.optics[theme], key, value); },
+    });
+  }
+  for (const key of Object.keys(environments[theme])) {
+    Object.defineProperty(view, key, {
+      enumerable: true,
+      get: () => Reflect.get(environments[theme], key),
+      set: (value) => { Reflect.set(environments[theme], key, value); },
+    });
+  }
+  themes[theme] = view;
+  return view;
+}
+
+/** Compatibility views used by existing controls; their optics are the active material's authored data. */
+export const looks: Record<Theme, Look> = {
+  light: composeLook(defaultMaterial, 'light'),
+  dark: composeLook(defaultMaterial, 'dark'),
+};

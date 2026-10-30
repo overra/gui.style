@@ -11,6 +11,18 @@ first. Code is cited by file and function, since line numbers move.
 - **Open**: a decision still to make, numbered Q1 to Q26 at the end.
 - **est.**: computed by a throwaway script (camera, lens, gobo, unit arithmetic, or a CPU putty port), not measured.
 
+## Design direction (decided, 2026-10-29)
+
+The direction is "Blender meets Figma": a browser-based workspace for designing websites, with TypeGPU and
+related tools powering rendering and simulation. Pages, interface elements, materials, lights and the website's
+camera are parts of the scene being authored. The editor's orbit view lets you work around that scene; the
+website's camera defines the view presented on the page. The DOM remains the source of content, semantics and
+interaction.
+
+**Lights live in the world (Q9, answered).** The scene owns their world transforms. Moving a page, raising an
+element or scrolling the camera leaves the lights in place. M1 implements that ownership while preserving the
+default composition and its normal-mode frames.
+
 ## What was asked
 
 | Request | Where |
@@ -117,12 +129,13 @@ not change: a seeded run (the intro, a press, a drag, the release, then rest aft
 ## Target architecture (proposal)
 
 The site holds scenes and routes, a scene holds pages, and a page holds layers and elements. Materials and media are
-shared resources named by id, and lights are nodes with a parent (Q9). Each scene has one camera and its own gravity.
+shared resources named by id. The scene owns world-space light nodes (Q9, decided), one camera and its own gravity.
 
 - **Page space** is one page's CSS px: x right and y down from its top-left corner, z out of the page. The UI layer
   (the real DOM) sits on the reference plane, z = 0, and art and video layers sit behind it. Re-centred on the
-  camera's window, page space is today's world frame, so the glass and its studio, the softbox frames, the goo frames
-  and every equation in `docs/3d-config-view.md` hold on every page.
+  camera's window, page space is today's world frame, so the goo frames and page-relative optics math in
+  `docs/3d-config-view.md` hold on every page. Shading derives local light directions and emitter frames from the
+  scene's world-space lights. The procedural sky and horizon's orientation remains Q1.
 - **World space** is the scene's frame, today's world frame with up (0, −1, 0), where gravity, the 3D view and
   transitions live. A page's placement (its top-left corner in the world, plus a yaw about up) maps its space into
   the world; today's page sits at (−W/2, −H/2, 0).
@@ -139,12 +152,12 @@ interface SceneDoc {                   // the scene document, sketched; site.jso
   id: string;
   gravity: Vec3;                       // in g, world frame; default (0, 1, 0), as scene.gravity
   pages: { id: string; file: string; position: Vec3; yaw: number }[];   // top-left corner; turn about up
-  lights: LightNode[];                 // parent: 'world', a page id or an element id (Q9)
+  lights: LightNode[];                 // scene-owned world transforms (Q9, decided)
   camera: { distance: number; lens?: { aperture: number; focus: number; tilt: number; focusLine: number; ramp: 'band' | 'receding' } };
   transitions?: { from: string; to: string; path: 'truck' | 'overview' | 'dissolve'; duration: number }[];
 }
 interface PageDoc {
-  id: string; title: string; html: string; module?: string; height: number | 'content'; lights?: LightNode[];
+  id: string; title: string; html: string; module?: string; height: number | 'content';
   layers: { id: string; kind: 'ui' | 'art' | 'video'; depth: number; src?: string }[];
   media?: { layer: string; frames: string; count: number; pxPerFrame: number; pinAt: number }[];   // page px
 }
@@ -154,16 +167,64 @@ interface PageDoc {
 
 ### Scene document and materials as data (M1, after M0)
 
-The scene becomes the versioned document above, with ids, export, import and persistence; today `defaultScene()`
-rebuilds it from look.ts on every load. `params`, `looks` and `effectiveParams()` hold one global material, which
-becomes a record that the putty and its particles share, and look.ts keeps only the environment (the 3D view docs'
-next step 1). Every later milestone adds fields, so versioning now saves migrating singletons one at a time.
+**Landed, 2026-10-29.** `src/scene/document.ts` owns the version 1 document: stable ids,
+one camera, gravity, one page with an art layer and a goo element, world lights and named material records. The
+element refers to its material by id. Version 1 deliberately matches the current renderer's capacity: one page,
+one goo element, one sun and at most three softboxes. The broader multi-page schema above remains a proposal.
 
-- **Approach.** `effectiveParams` takes a material as well as the gravity. `page.depth` and `page.fill` become an
-  art layer's depth and scale mode, `goo.hover` an element property, and lights get ids and a parent (Q9). Panels
-  edit the document in place, as the Gravity folder edits `scene.gravity`; documents migrate on load.
-- **Hard parts.** Moving every default without changing a pixel: `__goo.scene.identity()` stays 0 and seeded frames
-  stay identical. Optics differ per theme.
+- **Shared edits.** The editor and `window.guiStyle.scene` use the same validation and history. `ready` waits for
+  initial placement; `export()` returns a detached document; `load(objectOrJson)` validates before adoption;
+  `edit({ id, changes }, { expectedRevision })` also accepts an atomic batch. Unknown fields, invalid numbers,
+  missing references, duplicate ids and unsupported versions are rejected with field diagnostics. Undo/redo
+  keeps authored state, and external edits end active editor drags. There was no previously shipped file format;
+  `readSceneDocument` is the entry point for future migrations.
+- **Persistence.** Accepted edits save under `gui.style.scene.v1` in browser local storage. The Scene document
+  folder imports/exports JSON and exposes undo/redo. `reset()`, `save()`, `clearSaved()`, `saved` and `storageError`
+  are also available through the shared API. Browser storage failure preserves the live edit and reports the
+  unsaved status.
+- **Materials.** `src/materials.ts` holds physics/feel parameters and per-theme optics. `effectiveParams` accepts
+  a material and gravity; `composeLook` combines optics with the environment. Active material binding preserves
+  references held by controls, while inactive records retain their values. Shape/grid changes rebuild transient
+  simulation state. `look.ts` retains the environment and the initial rig defaults.
+- **World lights.** The default rig is placed once at the first layout, around the unlifted button. Imported
+  world positions are preserved. Moving the page, camera or hovering element leaves them fixed; the glass samples
+  their direction and angular size from the moving goo. Per-pixel positional lighting is still later work.
+- **Measured verification.** The 16 native Node tests pass, as does the production build. At 1440 × 900, DPR 2,
+  both themes match the frozen pre-M1 build byte for byte through rest, press, drag, release and healing, for
+  both flat and default artwork; all captured simulation arrays also match exactly and `identity()` is 0. In-app
+  Chromium 156 (CSS fallback) and Canary 159 (html-in-canvas) each pass 20 document/editor checks, including
+  round-trip pixels, material switching, actual panel and preset edits, grouped undo, persistence and loading
+  before initial placement. The Canary page's live text was visually verified after allowing paint tasks.
+- **Bundle cost.** Initial JavaScript is 476.1 KB, up from 464.1 KB before M1. With the same Node compression
+  settings on both builds, gzip (level 9) grows from 127.3 to 131.6 KB and Brotli from 109.3 to 113.1 KB. This
+  exceeds the original no-growth proposal; the fallback's lazy GPU loading remains an M8 task.
+
+#### Research: a shared visual and text authoring model
+
+On 2026-10-29 the user shared Amichai's Brilliant demo as an idea to investigate. In the supplied transcript
+(about 0:35–1:15), he describes Blueprint as a compact, lossless text representation of the editable design;
+later variations reuse the project's design system. Brilliant's [Blueprint documentation](https://brilliant.design/docs/developers/blueprint)
+describes text edits that create native editable elements, stable references for subsequent changes, validation
+and incremental rendering. Its [design system documentation](https://brilliant.design/docs/design-system/overview)
+describes named token bindings shared by visual and text edits. The demo's generation speed and token savings
+remain claims to measure for our own workloads.
+
+**Implemented foundation in M1:** the scene document is the authored model shared by the editor and agents. A light
+drag, a numeric field and a text edit should produce equivalent validated changes to the same world light. Nodes
+keep stable ids and references to shared materials and assets; tokens, components and variants can extend those
+references as their authoring model is designed. The DOM continues to own native content, layout and semantics.
+
+- **Model and syntax.** M1 uses versioned JSON and edits addressed by id. Compare a compact text grammar
+  against it on token use, successful edits and useful diagnostics before choosing one. Explore batched edits,
+  revisions and undo through the same edit path. Streaming should apply valid batches without leaving a partial
+  design in place.
+- **Round-trip boundary.** Preserve the supported authored scene and material properties, ids and references.
+  GPU resources, simulation buffers and editor selection are separate runtime state. The existing HTML/module
+  boundary remains; lossless editing of arbitrary HTML, behavior and responsive layouts is a larger question,
+  and Q11 stays open.
+- **First experiment completed.** The browser checks export and reload the page, button, material and world
+  lights, exercise panel and text edits through the same document, and compare round-trip seeded frames. Ids and
+  material bindings survive, subsequent manual edits work, and the default passes M1's identity and pixel checks.
 
 ### Camera, tall pages and Shift+scroll (M2, after M1)
 
@@ -236,7 +297,7 @@ have a `kind` field, and paper lighting (`irradiance`, `paperLight`) exists ther
 softboxes as distant lights, with the shadow and caustics following the sun only.
 
 - **Lights as nodes.** A storage buffer of up to 16 lights replaces the four-light uniform array (`MAX_LIGHTS`). Kind
-  2 is a spot, each light hangs on the world, a page or an element (Q9), and `__goo.scene.addLight()` adds one that
+  2 is a spot, each light lives in world space (Q9, decided), and `__goo.scene.addLight()` adds one that
   the shader, the panel and `reset()` all see.
 - **The spot** has a position L, an aim a, a cone half-angle α (20°), an edge softness and a falloff. Its gobo is a
   layer of a 512² `texture_2d_array` (blinds, window panes, leaves, dots, water caustics) with a scale, a rotation ρ,
@@ -285,7 +346,7 @@ view docs' next step 4 and the plan's main architectural fork, so it waits until
 
 "multiple pages in a scene", with "navigation transitions between the scenes". Proposal: a scene is one world of
 upright pages, and a transition is a camera flight; what a scene is and how its pages are laid out is Q10. A page has
-a placement, the viewport's width, a height set by its content, layers, the lights it carries and a route; the
+a placement, the viewport's width, a height set by its content, layers and a route; the scene owns the lights. The
 default layout (proposal) is a strip along +x, 160 px apart. It builds on `flyTo`, `lerpPose` (now a plain blend, yaw
 the short way round), the 0.2 s cross-fade from the flat page to the scene canvas, and reduced motion's zero
 durations.
@@ -316,7 +377,7 @@ site/site.json                 routes, scenes, materials (ids → files)
 site/materials/<id>.json       optics, macros, behaviors
 site/scenes/<id>/scene.json    page placements, gravity, lights, camera, transitions
 site/pages/<id>/               page.html (the real DOM, with data-goo bindings), page.ts (optional, lazy),
-                               page.json (height, layers, media, lights), assets/ (art, image sequences, video)
+                               page.json (height, layers, media), assets/ (art, image sequences, video)
 site/gobos/<id>.png|ktx2
 ```
 
@@ -476,7 +537,7 @@ useblume.dev (Q25). Proposal: Static Assets first, with no Worker script. `wrang
 | ID | Milestone | Size | Needs | Normal mode | Done when |
 |---|---|---|---|---|---|
 | M0 | Safety net: seeded randomness and event times, `__goo.diff`, `__goo.sim.stats`, `__goo.glass`, test arts, `?tall`, `?perf`; fresh size, parity and budget baselines; phone testing over https. **Landed**; phone testing deferred (2026-10-29) | S | – | unchanged | Two seeded runs give identical frames; the baselines are recorded |
-| M1 | Scene document v1; materials as data | M | M0 | identical | `export()` and `load()` round-trip; `identity()` is 0; seeded frames are unchanged |
+| M1 | Scene document v1; materials as data. **Landed (2026-10-29)** | M | M0 | identical at defaults | `export()` and `load()` round-trip; `identity()` is 0; seeded frames are unchanged |
 | M2 | Camera height, tall pages, Shift+scroll, `viewCenter`, the 3D view's window/page split, device limits, tiles | L | M1 | scrolling made correct | `?tall=6000` runs at DPR 2; scrolled 1200 px on `?tall=3000&at=1200&art=flat`, the goo matches scroll 0 within 1 LSB; a 300 px Shift+wheel moves the frustum 300 px, and exit lands at `scrollY` 300 |
 | M3 | DOF and tilt-shift in the 3D view | M | M1 | unchanged | On `?art=bars` the 10–90% edge width follows 0.69·CoC, about 7.4 px at the bottom edge with the band preset |
 | M4 | Spot lights and gobos in the 3D view | M | M1 | unchanged | The stripe period at the spot's centre matches the projection; with no spot, `identity()` is 0 |
@@ -493,7 +554,7 @@ useblume.dev (Q25). Proposal: Static Assets first, with no Worker script. `wrang
 
 ## Build order
 
-1. **Re-found:** M0, then M1. Normal mode stays bit-identical, checked with `identity()` and seeded pixel diffs.
+1. **Re-found:** M0 and M1 are implemented. Default normal mode stays bit-identical, checked with `identity()` and seeded pixel diffs.
 2. **Look development in the 3D view:** M3 and M4, alongside M2; neither touches normal mode.
 3. **The camera:** M2, then M9 and M3's scrolling demo. M2 is the keystone: the camera's height, tall pages and the
    scroll mapping underlie the focus band, video pinning and the frames of several pages.
@@ -561,7 +622,7 @@ hit testing, so check real pointer paths with `document.elementFromPoint` or rea
 | `__goo.sim.stats(element?)` | M0 (landed) | Volume Σ(rest + m)·cell², the resting volume, the volume's centroid in page px and the range of m, from `__goo.readSim()` |
 | `__goo.glass()` | M0 (landed) | The glass uniforms the last frame wrote, after the scene hook |
 | `?art=flat`, `?art=bars`, `?tall=N&at=M`, `?perf`, `__goo.perf()` | M0 (landed) | A solid and a high-contrast test art; a page N px taller, with M px of the extra above `.stage`; the perf overlay and its figures |
-| `__goo.scene.export()`, `load(doc)` | M1 | Round-trips the scene document |
+| `__goo.scene.export()`, `load(doc)`, `edit(edits, options)`, `undo()`, `redo()` | M1 (implemented) | Shared versioned document and validated edits by id; also available as `window.guiStyle.scene` in production |
 | `__goo.scrollTo(y)`, `__goo.scene.camera.scrollTo(s)`, `.y` | M2 | Scrolls the page's scroller and re-measures; moves the scene camera; reads its height on the page |
 | `config().dev.setOptics(o)`, `dev.cocAt(x, y)` | M3 | Lens settings (`debug: true` shows CoC as a heat map); the expected CoC at a point |
 | `__goo.scene.addLight(l)` | M4 | Adds a light that the shader, the panel and `reset()` all see |
@@ -573,7 +634,10 @@ hit testing, so check real pointer paths with `document.elementFromPoint` or rea
 
 ## Open questions
 
-1. Keep the glass's studio page-relative, in front of the page (normal mode unchanged), or move it to world up?
+Q9 is answered below; its number is kept for references. The remaining questions are open.
+
+1. Keep the procedural studio environment (sky and horizon) page-relative, in front of the page (normal mode
+   unchanged), or move it to world up? Light anchoring is decided separately in Q9.
 2. When gravity returns to a value the material can hold, re-mold to the molded shape (as now) or stay sagged?
 3. The settle layer fast-forwards a sag's slow tail ×4 after 6 s; without that, a honey-like slump would keep the loop
    awake for about 100 s. Keep it, or play the whole slump in real time?
@@ -586,7 +650,8 @@ hit testing, so check real pointer paths with `document.elementFromPoint` or rea
 7. In normal mode, does DOF blur live DOM text (html-in-canvas in Chrome 157+, CSS bands elsewhere), or only the art
    and the glass? Do interactive elements always stay sharp?
 8. Gobos in the 3D view first, with only glass highlights in normal mode? On a self-lit page, hidden or additive?
-9. By default, are lights anchored in the world, carried by pages, or carried by elements?
+9. **Answered, 2026-10-29:** lights live in the world. The scene owns their transforms; page, element and camera
+   movement leaves them in place. Implemented in M1.
 10. Is a scene a group of pages (camera moves within, dissolves between), or is every page its own scene? Are its
     pages artboards side by side on a wall, one long page, a stack in depth, a ring, or turned about world up?
 11. How are pages authored: HTML fragments plus TypeScript and JSON, or a component framework?

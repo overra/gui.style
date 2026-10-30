@@ -29,6 +29,7 @@ import { looks } from '../look.ts';
 import { params, restHeightCpu } from '../params.ts';
 import { addGravityFolder, addMaterialFolder } from '../materialPanel.ts';
 import type { SceneHostDeps } from './host.ts';
+import type { SceneStore } from './document.ts';
 import { createUiPlane, htmlInCanvasSupport } from './htmlInCanvas.ts';
 import {
   add,
@@ -69,6 +70,10 @@ import {
   gooFrame,
   gooFrameDir,
   lightPosition,
+  lightDirection,
+  lightDistance,
+  moveWorldLight,
+  setLightDistance,
   MAX_HOVER,
   physicalHalfSize,
   planeScale,
@@ -84,6 +89,10 @@ import {
 export interface ConfigDeps extends SceneHostDeps {
   scene: Scene;
   sceneChanged: () => void;
+  document: SceneStore['api'];
+  resetScene: () => void;
+  beginEdit: () => void;
+  endEdit: () => void;
   onActiveChange: (active: boolean) => void;
 }
 
@@ -443,7 +452,7 @@ export function createConfigMode(deps: ConfigDeps) {
   function lightInput(l: SceneLight, target: Vec3, theme: 'light' | 'dark') {
     const [hx, hy] = physicalHalfSize(l);
     const rad = l.radiance[theme];
-    const alpha = Math.max(l.radius * sizeFactor(l), 1e-3);
+    const alpha = Math.max(l.radius * sizeFactor(l, target), 1e-3);
     return {
       pos: vec(lightPosition(l, target)),
       kind: l.kind === 'sun' ? 0 : 1,
@@ -514,8 +523,8 @@ export function createConfigMode(deps: ConfigDeps) {
     // The flat shader's per-frame values, with the scene's lights; the gap is traced for real, not folded in.
     const glass = {
       ...(res?.glass ?? ({} as SceneViewFrame['glass'])),
-      ...glassLights(scene, theme),
-      ...glassDepthTerms3d(scene, look, deps.pose()),
+      ...glassLights(scene, theme, rigTarget(layout, scene, deps.pose())),
+      ...glassDepthTerms3d(scene, look, deps.pose(), rigTarget(layout, scene, deps.pose())),
     };
     return { scene: sceneParams, glass, ...gizmos(cam, layout, target, theme) };
   }
@@ -912,21 +921,21 @@ export function createConfigMode(deps: ConfigDeps) {
 
   // ---- input ----
   function moveLight(l: SceneLight, p: Vec3, distanceOnly: boolean) {
-    const off = sub(p, rigTarget(deps.layout(), scene));
-    if (!distanceOnly) aimLight(l, off);
-    l.distance = clamp(distanceOnly ? dot(off, normalize(l.dir)) : length(off), 150, 8000);
+    moveWorldLight(l, p, rigTarget(deps.layout(), scene), distanceOnly);
     deps.sceneChanged();
   }
 
   function endDrag() {
     if (drag?.kind === 'press') deps.tracker.release(drag.id, deps.clock());
     drag = null;
+    deps.endEdit();
     canvas.classList.remove('is-dragging');
     deps.wake();
   }
 
   canvas.addEventListener('pointerdown', (e) => {
     if (phase !== 'on' && phase !== 'entering') return;
+    deps.beginEdit();
     e.preventDefault();
     try {
       canvas.setPointerCapture(e.pointerId);
@@ -1108,7 +1117,8 @@ export function createConfigMode(deps: ConfigDeps) {
     container.className = 'scene-panel';
     document.body.append(container);
     gui = new GUI({ container, title: '3D scene', width: 290 });
-    gui.onChange(() => deps.sceneChanged());
+    gui.onChange(() => { deps.beginEdit(); deps.sceneChanged(); });
+    gui.onFinishChange(() => deps.endEdit());
     const H = () => window.innerHeight;
 
     const camera = {
@@ -1156,32 +1166,34 @@ export function createConfigMode(deps: ConfigDeps) {
       // World-up angles; the getters are only polled, so opening the panel never rewrites a light. aimLight keeps
       // it within 85° of the page's axis, so a corner like (75°, 75°) reads back a little inside it.
       get elevation() {
-        return toElevationSwing(L().dir).elevation;
+        return toElevationSwing(lightDirection(L(), rigTarget(deps.layout(), scene))).elevation;
       },
       set elevation(e: number) {
-        aimLight(L(), fromElevationSwing(e, toElevationSwing(L().dir).swing));
+        const target = rigTarget(deps.layout(), scene);
+        aimLight(L(), fromElevationSwing(e, toElevationSwing(lightDirection(L(), target)).swing), target);
       },
       get swing() {
-        return toElevationSwing(L().dir).swing;
+        return toElevationSwing(lightDirection(L(), rigTarget(deps.layout(), scene))).swing;
       },
       set swing(s: number) {
-        aimLight(L(), fromElevationSwing(toElevationSwing(L().dir).elevation, s));
+        const target = rigTarget(deps.layout(), scene);
+        aimLight(L(), fromElevationSwing(toElevationSwing(lightDirection(L(), target)).elevation, s), target);
       },
       get distance() {
-        return L().distance;
+        return lightDistance(L(), rigTarget(deps.layout(), scene));
       },
       set distance(x: number) {
-        L().distance = x;
+        setLightDistance(L(), x, rigTarget(deps.layout(), scene));
       },
       get brightness() {
         const t = deps.theme();
-        return maxc(L().radiance[t]) / (maxc(defaults.lights[selected].radiance[t]) || 1);
+        return maxc(L().radiance[t]) / (maxc(defaults.lights.find((l) => l.id === L().id)?.radiance[t] ?? [1, 1, 1]) || 1);
       },
       set brightness(b: number) {
         const t = deps.theme();
         const r = L().radiance[t];
         const m = maxc(r);
-        const want = b * (maxc(defaults.lights[selected].radiance[t]) || 1);
+        const want = b * (maxc(defaults.lights.find((l) => l.id === L().id)?.radiance[t] ?? [1, 1, 1]) || 1);
         L().radiance[t] = m > 0 ? scale(r, want / m) : [want, want, want];
       },
       get color() {
@@ -1202,6 +1214,40 @@ export function createConfigMode(deps: ConfigDeps) {
     lights.add(light, 'distance', 150, 6000, 1).name('distance (px)').listen();
     lights.add(light, 'brightness', 0, 4, 0.01).name('brightness (× default)').listen();
     lights.addColor(light, 'color').name('color').listen();
+
+    const doc = gui.addFolder('Scene document');
+    const info = {
+      get revision() { return deps.document.revision; },
+      get storage() { return deps.document.storageError ? 'Not saved: ' + deps.document.storageError : deps.document.saved ? 'Saved on this browser' : 'Default scene'; },
+      export() {
+        const url = URL.createObjectURL(new Blob([JSON.stringify(deps.document.export(), null, 2) + '\n'], { type: 'application/json' }));
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'gui-style-scene.json';
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+      },
+      import() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json,application/json';
+        input.addEventListener('change', async () => {
+          const file = input.files?.[0];
+          if (!file) return;
+          try { deps.document.load(await file.text()); }
+          catch (error) { window.alert(error instanceof Error ? error.message : String(error)); }
+        });
+        input.click();
+      },
+      undo() { deps.document.undo(); },
+      redo() { deps.document.redo(); },
+    };
+    doc.add(info, 'revision').disable().listen();
+    doc.add(info, 'storage').name('storage').disable().listen();
+    doc.add(info, 'export').name('Export JSON');
+    doc.add(info, 'import').name('Import JSON');
+    doc.add(info, 'undo').name('Undo');
+    doc.add(info, 'redo').name('Redo');
 
     const viewF = gui.addFolder('View');
     viewF.add(scene, 'probes').name('probe balls').listen();
@@ -1235,18 +1281,20 @@ export function createConfigMode(deps: ConfigDeps) {
   }
 
   function reset() {
-    const fresh = defaultScene();
-    Object.assign(scene.camera, fresh.camera);
-    Object.assign(scene.page, fresh.page);
-    Object.assign(scene.goo, fresh.goo);
-    scene.lights.forEach((l, i) => Object.assign(l, fresh.lights[i]));
-    scene.probes = fresh.probes;
-    // In place: the panels hold this array.
-    scene.gravity.splice(0, 3, ...fresh.gravity);
-    deps.sceneChanged();
+    deps.resetScene();
   }
 
   return {
+    refresh(rebuild = false) {
+      if (rebuild) {
+        endDrag();
+        pointers.clear();
+        pinch = null;
+      }
+      selected = Math.min(selected, scene.lights.length - 1);
+      if (rebuild && gui) { closePanel(); openPanel(); }
+      else gui?.controllersRecursive().forEach((controller) => controller.updateDisplay());
+    },
     setGpu,
     enter,
     exit,
@@ -1284,12 +1332,12 @@ export function createConfigMode(deps: ConfigDeps) {
       },
       depthHandle,
       lightAngles(i: number) {
-        const dir = scene.lights[i].dir;
+        const dir = lightDirection(scene.lights[i], rigTarget(deps.layout(), scene));
         const n = normalize(dir);
         return { ...toElevationSwing(dir), offAxis: Math.acos(clamp(n[2], -1, 1)) / DEG };
       },
       aimLight(i: number, elevation: number, swing: number) {
-        aimLight(scene.lights[i], fromElevationSwing(elevation, swing));
+        aimLight(scene.lights[i], fromElevationSwing(elevation, swing), rigTarget(deps.layout(), scene));
         deps.sceneChanged();
       },
       flyTo,

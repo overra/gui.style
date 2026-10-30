@@ -11,8 +11,9 @@ import { looks } from '../look.ts';
 import { params } from '../params.ts';
 import type { FingerTracker } from '../touches.ts';
 import type { ConfigMode } from './configMode.ts';
+import { createSceneDocument, createSceneStore, readSceneDocument, SceneDocumentError, type SceneEdit } from './document.ts';
 import { normalize } from './math.ts';
-import { defaultScene, gapSoftening, glassDepthTerms, glassLights, gooGravity, MAX_HOVER, type Scene } from './scene.ts';
+import { defaultScene, gapSoftening, glassDepthTerms, glassLights, gooGravity, initializeWorldLights, lightDirection, MAX_HOVER, rigTarget } from './scene.ts';
 import './scene.css';
 
 export interface SceneHostDeps {
@@ -28,10 +29,43 @@ export interface SceneHostDeps {
   pose: () => LevitationPose;
   /** Re-measure the page layout (after the 3D view hands the page UI back). */
   resync: () => void;
+  /** A loaded material may need a new simulation grid; scalar and optics edits only redraw. */
+  materialChanged: (structural: boolean) => void;
 }
 
 export function createSceneHost(deps: SceneHostDeps) {
-  const scene: Scene = defaultScene();
+  let config: ConfigMode | null = null;
+  const store = createSceneStore(createSceneDocument(), (change) => {
+    deps.materialChanged(change.structural);
+    config?.refresh(change.source !== 'editor');
+    deps.wake();
+  });
+  const scene = store.scene;
+  let placed = store.restore();
+  let resolveReady!: () => void;
+  const ready = new Promise<void>((resolve) => { resolveReady = resolve; });
+  function initialize() {
+    const layout = deps.layout();
+    if (!placed && layout) {
+      initializeWorldLights(scene, layout);
+      placed = true;
+      store.initialize();
+    }
+    if (placed) resolveReady();
+  }
+  function requireReady() {
+    initialize();
+    if (!placed) throw new SceneDocumentError([{ path: 'scene', message: 'layout is not ready; await guiStyle.scene.ready' }]);
+  }
+  function reset() {
+    const fresh = createSceneDocument();
+    const runtime = { ...defaultScene(), lights: fresh.lights };
+    const layout = deps.layout();
+    if (layout) initializeWorldLights(runtime, layout);
+    placed = !!layout;
+    store.api.load(fresh);
+    initialize();
+  }
   const query = new URLSearchParams(location.search);
   // ?hover=40 starts with the button floating 40 px in front of the page.
   const hover = Number(query.get('hover'));
@@ -43,17 +77,40 @@ export function createSceneHost(deps: SceneHostDeps) {
     const v = GRAVITY[gq] ?? gq.split(',').map(Number);
     if (v.length === 3 && v.every(Number.isFinite)) scene.gravity.splice(0, 3, ...v.map((c) => Math.min(Math.max(c, -10), 10)));
   }
+  store.initialize();
+  const documentApi = {
+    ...store.api,
+    ready,
+    export() { requireReady(); return store.api.export(); },
+    save() { requireReady(); return store.api.save(); },
+    load(input: unknown) {
+      const next = readSceneDocument(input);
+      placed = true;
+      const revision = store.api.load(next);
+      resolveReady();
+      return revision;
+    },
+    edit(edits: SceneEdit | SceneEdit[], options?: { expectedRevision?: number }) {
+      requireReady();
+      return store.api.edit(edits, options);
+    },
+    reset,
+    get revision() { return store.api.revision; },
+    get saved() { return store.api.saved; },
+    get storageError() { return store.api.storageError; },
+    get canUndo() { return store.api.canUndo; },
+    get canRedo() { return store.api.canRedo; },
+  };
   let goo: Goo | null = null;
   let root: TgpuRoot | null = null;
-  let config: ConfigMode | null = null;
   let loading: Promise<ConfigMode | null> | null = null;
 
   /** Normal mode: the scene's lights, eye distance, page depth and the floating goo, as glass uniforms. */
-  const glassHook = (values: GlassInput, theme: Theme): GlassInput => ({
-    ...values,
-    ...glassLights(scene, theme),
-    ...glassDepthTerms(scene, looks[theme], deps.pose()),
-  });
+  const glassHook = (values: GlassInput, theme: Theme): GlassInput => {
+    initialize();
+    const target = rigTarget(deps.layout(), scene, deps.pose());
+    return { ...values, ...glassLights(scene, theme, target), ...glassDepthTerms(scene, looks[theme], deps.pose(), target) };
+  };
 
   /**
    * How far past the button a floating goo's shadow reaches in normal mode (CSS px): displaced toward the far side
@@ -68,17 +125,21 @@ export function createSceneHost(deps: SceneHostDeps) {
     const look = looks[deps.theme()];
     const gap = rest + 0.3 * params.levitation.travel;
     const sun = scene.lights.find((l) => l.kind === 'sun');
-    const L = normalize(sun ? sun.dir : [look.lightDir[0], look.lightDir[1], look.lightDir[2]]);
+    initialize();
+    const target = rigTarget(layout, scene, deps.pose());
+    const L = normalize(sun ? lightDirection(sun, target) : [look.lightDir[0], look.lightDir[1], look.lightDir[2]]);
     const shift = (gap * Math.max(Math.abs(L[0]), Math.abs(L[1]))) / Math.max(L[2], 0.05);
     const D = scene.camera.distance;
     const fromCenter =
       Math.hypot(layout.canvasX + s0.cx - layout.viewportW / 2, layout.canvasY + s0.cy - layout.viewportH / 2) + Math.max(s0.hx, s0.hy);
     const parallax = ((D + scene.page.depth) / Math.max(D - scene.goo.hover, 0.2 * D) - 1) * fromCenter;
-    const sigma = gapSoftening(scene, look, gap).shadowSigma ?? look.shadowSigma;
+    const sigma = gapSoftening(scene, look, gap, target).shadowSigma ?? look.shadowSigma;
     return shift + parallax + look.shadowReach + 2.5 * sigma;
   }
 
   function sceneChanged() {
+    initialize();
+    store.changed();
     deps.wake();
   }
 
@@ -100,7 +161,8 @@ export function createSceneHost(deps: SceneHostDeps) {
   async function loadConfig(): Promise<ConfigMode | null> {
     if (config) return config;
     loading ??= import('./configMode.ts').then(({ createConfigMode }) => {
-      config = createConfigMode({ ...deps, scene, sceneChanged, onActiveChange: syncToggle });
+      initialize();
+      config = createConfigMode({ ...deps, scene, sceneChanged, document: documentApi, resetScene: reset, beginEdit: store.begin, endEdit: store.end, onActiveChange: syncToggle });
       if (root && goo) config.setGpu(root, goo);
       return config;
     });
@@ -149,6 +211,11 @@ export function createSceneHost(deps: SceneHostDeps) {
 
   return {
     scene,
+    document: documentApi,
+    material: () => store.material,
+    initialize,
+    beginEdit: store.begin,
+    endEdit: store.end,
     attach,
     detach,
     sceneChanged,
@@ -169,6 +236,13 @@ export function createSceneHost(deps: SceneHostDeps) {
     },
     /** Dev aids: __goo.scene.* */
     dev: {
+      ...documentApi,
+      get revision() { return store.api.revision; },
+      get saved() { return store.api.saved; },
+      get storageError() { return store.api.storageError; },
+      get canUndo() { return store.api.canUndo; },
+      get canRedo() { return store.api.canRedo; },
+      reset,
       scene,
       /** Call after editing `scene` by hand (wakes the loop). */
       changed: sceneChanged,

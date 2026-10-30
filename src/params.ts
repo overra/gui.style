@@ -163,10 +163,10 @@ export const params = {
 export type Params = typeof params;
 
 /** Rest height (CSS px) of the putty at a signed distance `sd` (negative inside): H0 (1 - (1 - t)³)^(1/B). */
-export function restHeightCpu(sd: number): number {
+export function restHeightCpu(sd: number, source: Params = params): number {
   const u = -sd;
   if (u <= 0) return 0;
-  const { plateau, bezel, steepness } = params.shape;
+  const { plateau, bezel, steepness } = source.shape;
   const t = Math.min(u / bezel, 1);
   const g = 1 - (1 - t) ** 3;
   return plateau * g ** (1 / steepness);

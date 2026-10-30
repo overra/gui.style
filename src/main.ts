@@ -195,7 +195,7 @@ const frame = (ms: number) => {
   lastFrame = now;
 
   const gravity = sceneHost.gravity();
-  const eff = effectiveParams(gravity);
+  const eff = effectiveParams(sceneHost.material(), gravity);
   tracker.setTuning(eff.finger);
   tracker.update(now, dt, goo.surfaceAt);
   const { scene } = sceneHost;
@@ -268,7 +268,22 @@ const sceneHost = createSceneHost({
     relayout();
     track();
   },
+  materialChanged: (structural) => {
+    if (structural && goo && layout) {
+      const budget = matchMedia('(pointer: coarse)').matches ? params.pixelBudget.coarse : params.pixelBudget.fine;
+      gooScale = Math.min(window.devicePixelRatio || 1, MAX_DPR, Math.sqrt(budget / Math.max(1, layout.width * layout.height)));
+      gooCanvas.width = Math.max(1, Math.round(layout.width * gooScale));
+      gooCanvas.height = Math.max(1, Math.round(layout.height * gooScale));
+      layout = { ...layout, cell: params.sim.cell, cols: Math.max(4, Math.ceil(layout.width / params.sim.cell)), rows: Math.max(4, Math.ceil(layout.height / params.sim.cell)) };
+      goo.setLayout(layout, gooScale, false, true);
+      repaintLabel();
+      levitation.reset();
+    }
+    void guiPromise?.then((gui) => gui.refresh());
+  },
 });
+// The same validated document API is available to agents in development and production.
+Object.assign(window, { guiStyle: { scene: sceneHost.document } });
 
 // ---- bring-up, with recovery from device loss ----
 let losses: number[] = [];
@@ -354,7 +369,9 @@ async function toggleTuning(open = !guiOpen) {
   guiPromise ??= import('./tuning.ts').then(({ openTuning }) =>
     openTuning({
       theme,
-      wake,
+      wake: sceneHost.sceneChanged,
+      beginEdit: sceneHost.beginEdit,
+      endEdit: sceneHost.endEdit,
       replayDrop: dropAgain,
       tap: () => buttons[0]?.click(),
       goo: sceneHost.scene.goo,
@@ -473,7 +490,7 @@ if (import.meta.env.DEV) {
       },
       drop: dropAgain,
       /** The effective parameters this frame would use (feel and material macros, guard, gravity). */
-      eff: () => effectiveParams(sceneHost.gravity()),
+      eff: () => effectiveParams(sceneHost.material(), sceneHost.gravity()),
       /** The last frame's sag check: regime, S, Sedge, K and the face drives; plus the settle layer's phase. */
       sag: () => (goo ? { ...goo.sag, phase: goo.settlePhase } : null),
       /** Copies of the simulation state: e, v, m, age and the settled shape ms, per cell (Float32Arrays). */

@@ -10,6 +10,8 @@ import { MAX_HOVER } from './scene/scene.ts';
 export interface TuningHooks extends MaterialHooks {
   theme: () => Theme;
   wake: () => void;
+  beginEdit: () => void;
+  endEdit: () => void;
   replayDrop: () => void;
   tap: () => void;
   /** The goo's place in the scene (scene/scene.ts): how far it hovers in front of the page. */
@@ -38,7 +40,8 @@ const PRESETS: Record<string, { feel: Feel; material?: Partial<Material> }> = {
 
 export function openTuning(hooks: TuningHooks) {
   const gui = new GUI({ title: 'Tweak the goo', width: 310 });
-  gui.onChange(() => hooks.wake());
+  gui.onChange(() => { hooks.beginEdit(); hooks.wake(); });
+  gui.onFinishChange(() => hooks.endEdit());
 
   const feel = gui.addFolder('Goo');
   const preset = { name: 'Glass putty' };
@@ -49,6 +52,7 @@ export function openTuning(hooks: TuningHooks) {
       Object.assign(params.feel, PRESETS[name].feel);
       Object.assign(params.material, NEUTRAL, PRESETS[name].material);
       gui.controllersRecursive().forEach((c) => c.updateDisplay());
+      hooks.wake();
     });
   feel.add(params.feel, 'viscosity', 0, 1, 0.01).name('viscosity (thin → thick)');
   feel.add(params.feel, 'elasticity', 0, 1, 0.01).name('elasticity (doughy → bouncy)');
@@ -141,6 +145,7 @@ export function openTuning(hooks: TuningHooks) {
   gui.onOpenClose(follow);
 
   return {
+    refresh() { gui.controllersRecursive().forEach((controller) => controller.updateDisplay()); },
     show(open: boolean) {
       shown = open;
       gui.show(open);

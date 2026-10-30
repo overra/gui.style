@@ -1,7 +1,8 @@
 // "Feel" macros → the physical and visual knobs they drive. Each macro runs 0..1 with 0.5 = the tuned defaults in
 // params.ts, so the base values stay editable on their own. Everything here is recomputed every frame.
 
-import { params } from './params.ts';
+import type { Material } from './materials.ts';
+import { params, type Params } from './params.ts';
 import type { FingerTuning } from './touches.ts';
 
 /** 0 → 1/r, 0.5 → 1, 1 → r (log-symmetric around the defaults). */
@@ -31,8 +32,12 @@ export interface GooGravity {
 
 export const NO_GRAVITY: GooGravity = { x: 0, y: 0, n: 0 };
 
-export function effectiveParams(gravity: GooGravity = NO_GRAVITY): Effective {
-  const { feel, material, elastic, plastic, heal, finger, detail, intro, sim, levitation } = params;
+export function effectiveParams(gravity?: GooGravity): Effective;
+export function effectiveParams(source: Material | Params, gravity?: GooGravity): Effective;
+export function effectiveParams(source: Material | Params | GooGravity = params, pull: GooGravity = NO_GRAVITY): Effective {
+  const authored = 'params' in source ? source.params : 'feel' in source ? source : params;
+  const gravity = 'params' in source || 'feel' in source ? pull : source;
+  const { feel, material, elastic, plastic, heal, finger, detail, intro, sim, levitation } = authored;
   const dt = sim.substep;
   const v = ratio(feel.viscosity, 4);
   const s = ratio(feel.elasticity, 2.8);

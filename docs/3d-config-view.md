@@ -27,6 +27,17 @@ dev, or with `?scene` or `?tune`. **Esc** or **C** returns to the page.
   displace the whole button in 3D, as well as squishing it.
 - This 3D config interface is going to become a bigger part of the project.
 
+**Direction (from the user, 2026-10-29).**
+
+- The direction is "Blender meets Figma": the 3D view is becoming a browser-based workspace for designing
+  websites, with TypeGPU and related tools powering rendering and simulation. The editor's orbit view works
+  around the scene; the website's camera defines the view presented on the page.
+- Brilliant's Blueprint is a reference to investigate for visual and agent text editing of the same design
+  model. The [M1 research proposal](roadmap.md#research-a-shared-visual-and-text-authoring-model) describes a first
+  experiment; no text grammar has been chosen.
+- Lights live in the world (roadmap Q9, answered). Page, element and camera movement leaves them in place. The
+  M1 scene document owns their world transforms while preserving the default composition.
+
 The levitating button is now prototyped: the goo has its own frame, floats at a hover distance, and a press pushes the
 whole button toward the page and tilts it before it springs back. See [Levitating button](#levitating-button-prototype).
 
@@ -45,8 +56,10 @@ In config mode:
 | File | What it does |
 |---|---|
 | `src/scene/scene.ts` | The scene model: camera, page plane, light rig. Derives the glass uniforms from it, plus the page-depth terms. |
+| `src/scene/document.ts` | Shared versioned document, validation, edits by id, undo/redo and browser persistence. |
+| `src/materials.ts` | Named material records with physics parameters and optics for both themes; active-material binding. |
 | `src/scene/math.ts` | Vectors, the orbit camera, projection, rays, and the CSS `matrix3d` that matches the WebGPU projection. |
-| `src/scene/host.ts` | Always loaded and small. Installs the glass hook, toggles config mode (C key / button), adds `__goo.scene`. |
+| `src/scene/host.ts` | Owns the document store, installs the glass hook, toggles config mode, and exposes the shared scene API. |
 | `src/scene/configMode.ts` | Config mode (lazy chunk): flights, orbit/pan/zoom, picking and dragging, labels, the lil-gui panel. |
 | `src/scene/htmlInCanvas.ts` | html-in-canvas feature detection, and the UI plane (live `.stage` DOM → WebGPU texture). |
 | `src/scene/scene.css` | Config-mode styles (inert otherwise). |
@@ -82,7 +95,7 @@ and textures and renders after the goo's frame in the same rAF tick. Making the 
 would change normal mode (a sim domain tied to the viewport, every pixel shaded, the pixel budget broken) and buy
 nothing there.
 
-Normal mode never creates the scene canvas or loads its code (a lazy chunk of about 72 KB; lil-gui comes in a
+Normal mode never creates the scene canvas or loads its code (a lazy chunk of about 74 KB after M1; lil-gui comes in a
 chunk shared with the tuning panel). The scene canvas is capped at about 3.2 MP of device pixels. On the M-series
 GPU this was tested on, orbiting with the html-in-canvas UI ran at the display's 120 Hz (median 8.3 ms frames). At
 3.2 MP the scene pass takes 1.2 to 3.1 ms of GPU time (median), depending on the view, and the frame 3.1 to 3.5 ms
@@ -101,9 +114,12 @@ origin is the viewport center on the **reference plane** z = 0, which is where t
 **World up is screen-up, (0, −1, 0).** The page is a wall and the scene camera is a level camera facing it. Two
 things keep the page's own frame, where z is the page's axis, and don't follow world up:
 
-- the glass and its studio: `env()`'s zenith, the sky ambient and the light rig's frame convention are page-relative,
-  as a screen on a wall reflects the room in front of it;
+- the glass and its procedural studio: `env()`'s zenith and the sky ambient stay page-relative, as a screen on a
+  wall reflects the room in front of it;
 - the goo's frame, the levitation gap (along z), `groundLight` and paper lighting.
+
+Lights store world positions and emitter axes. Their default axes use the existing page convention, but moving
+the page, camera or goo does not move the lights. The procedural sky and horizon have not changed (roadmap Q1).
 
 World up drives the 3D view's orbit, the backdrop gradient (lighter above eye level), where labels go and the light
 panel's angles. Gravity is a separate scene vector (see [Gravity and the material](#gravity-and-the-material)); the
@@ -232,11 +248,61 @@ at different scales (2 and 1.57 device px per CSS px); the largest is 38 (70 in 
 the page grain, resampled at those two scales: on `?art=flat` the mean is 0.37, and beside the button, where only the
 page and the shadow show, it is 0.08. The 0.2 s cross-fade hides it.
 
+## The shared scene document (M1)
+
+`src/scene/document.ts` owns the authored scene. The editor's controls and agents change the same live objects,
+with validation, revisions and undo history. The current document contains `version: 1`, a scene id, camera,
+gravity, pages with art layers and goo elements, world lights, materials and the probe visibility setting.
+Version 1 accepts exactly one page, one art layer and one goo element, one sun and up to three softboxes. Node ids
+are stable and unique; the goo names its material by id. The renderer's single-element limits are explicit.
+
+The API is `window.guiStyle.scene` in every build and `__goo.scene` in development. Wait for `ready` before
+exporting or editing a fresh default scene: initial light placement needs the first measured layout. A loaded
+document supplies its own world positions and is ready without placing its lights again.
+
+```js
+const scene = window.guiStyle.scene;
+await scene.ready;
+const original = scene.export();
+const revision = scene.revision;
+scene.edit([
+  { id: 'goo', changes: { hover: 40 } },
+  { id: 'sun', changes: { position: [-300, -500, 900] } },
+], { expectedRevision: revision });
+scene.undo();
+scene.redo();
+scene.load(original);                 // object or JSON string
+scene.validate(original);             // [] or { path, message } issues
+```
+
+`edit` merges the supplied fields into nodes found by id; it also accepts one `{ id, changes }` object. A batch
+is validated as a whole before any of it changes the live scene. An optional `expectedRevision` rejects an edit
+based on an old revision. Exports are independent copies. Unknown fields, unsupported versions, invalid values,
+duplicate ids and broken material references produce errors; loading never silently drops authored data. No
+older scene file format was shipped, so no migration is currently needed.
+
+The 3D panel's **Scene document** folder has Export JSON, Import JSON, Undo and Redo, with the current revision
+and storage status. Accepted changes save to `localStorage` under `gui.style.scene.v1` and restore on reload.
+`save()` retries a save; `saved` and `storageError` report the result. `clearSaved()` removes only the saved copy,
+and `reset()` restores the default scene for the current layout. `canUndo` and `canRedo` expose history state.
+The editor groups a drag into one undo step; external edits and loads are separate changes.
+
+`src/materials.ts` holds material records: id, name, physics parameters and optics for light and dark themes.
+`look.ts` holds the environment and default lights and composes a look from the active material. The active
+binding preserves references used by both panels, so an agent edit immediately updates their values. Structural
+material changes, such as shape or simulation-grid edits, rebuild the affected resources and reset transient
+simulation state. GPU resources, fingerprints, dents and the orbit camera are outside the authored document;
+native DOM content and semantics remain in the page. The compact text grammar and page-authoring choice (Q11)
+remain open.
+
 ## Lights and materials
 
-The rig hangs on the goo. Each light stores the direction from the goo center toward it (look.ts's vector,
-verbatim), a distance, and angular sizes that hold at a reference distance (`RIG_DISTANCE` = 1100). Lights keep
-their physical size, so moving one away shrinks its reflection.
+Lights have ids and explicit world positions. Their emitter directions and axes keep the existing optical
+convention, with angular sizes calibrated at a reference distance (`RIG_DISTANCE` = 1100). A fresh default rig is
+placed once around the unlifted button after its first layout; imported positions are kept verbatim. Later
+layout, hover, page-depth and camera changes leave the lights in place. Glass directions and apparent sizes are
+derived from the goo center's current world position. Lights keep their physical size, so a more distant light
+has a smaller reflection.
 
 The default rig is built from look.ts at runtime, for both themes:
 
@@ -380,7 +446,8 @@ world = origin + k · (x · X + y · Y + h · Z)      goo-space (x, y), height h
   - The world size shrinks with distance: by 3% at 40 px.
 - **The label** is printed on the glass' flat base, so it rides with the button. It used to be printed on the page;
   with no gap the two are the same place.
-- **The light rig** follows the goo's rest distance, not the presses.
+- **The world lights** stay in place as the goo's rest height or pressed pose changes; the glass samples their
+  directions and apparent sizes from its current center.
 
 ### Physics (`src/levitation.ts`)
 
@@ -508,7 +575,8 @@ The page depth is folded in as more air gap, so the existing page-depth case cha
   at 10 px) and the tilted silhouette's foreshortening. The 3D view shows both.
 - **Lateral motion.** A drag could nudge the button sideways (friction) and let it spring back. That moves it off
   its DOM box, so normal mode would need the ray-based input too.
-- **Lights.** The rig follows the hover. World-anchored lights would let the reflections shift as the button rises.
+- **Lights (implemented in M1).** World lights stay in place, so their reflections shift as the button rises.
+  The glass still samples them from its center; per-pixel positional lighting remains future work.
 - **More floating elements.** Each would need its own frame and cushion. The flat overlay's gap uniforms are per goo
   canvas.
 - **Idle motion.** A slow bob would sell the levitation, but would keep the frame loop (and the GPU) awake.
@@ -606,6 +674,10 @@ tail) and a 114 KB readback every 30 frames, until it settles; while it re-molds
 
 ## Dev harness additions
 
+M1's document API is described in [The shared scene document](#the-shared-scene-document-m1). Before comparing
+default frames, await `__goo.scene.ready` and call `__goo.scene.reset()` so a saved edit cannot affect the result.
+Call `clearSaved()` afterward if the test should leave no persisted scene.
+
 ```js
 __goo.scene.scene.goo.hover = 40; __goo.scene.changed()   // float the button (or ?hover=40)
 __goo.relayout()                  // re-measure now: a hidden tab gets no ResizeObserver callback after the canvas grows
@@ -619,7 +691,7 @@ __goo.scene.sheet([shot], 480)    // lay scene shots out over the page ([] clear
 __goo.scene.scene.page.depth = 600; __goo.scene.changed()   // edit the scene by hand
 __goo.scene.config().dev.setPose({ yaw: 60, pitch: 20 })  // also flyTo, focusPose(), overviewPose(), cameraPose()
 const dev = __goo.scene.config().dev
-dev.basis; dev.project([0, 0, 0]); dev.target           // the view's basis; world → viewport px; the rig target
+dev.basis; dev.project([0, 0, 0]); dev.target           // the view's basis; world → viewport px; the goo center
 dev.lightAngles(0); dev.aimLight(0, 45, -25)            // a light's elevation, swing and angle off the page's axis
 __goo.scene.scene.gravity.splice(0, 3, 0, 0, -1); __goo.scene.changed()   // gravity into the page (?gravity=floor)
 __goo.sag()                       // the last frame's check: regime, S, Sedge, K, the face drives, the settle phase
@@ -651,8 +723,8 @@ tall page yet (M2).
 ## Limitations
 
 - **Distant lights only.** The glass sees every light from the goo center: no per-pixel parallax, no positional
-  falloff across the goo. Lights are parented to the goo, not anchored in the world. The glass takes exactly one
-  sun and three softboxes (the `GlassParams` layout).
+  falloff across the goo. Lights are anchored in the world; the glass uniform layout holds one sun and at most
+  three softboxes. The sun remains directional for page and probe irradiance.
 - **Paper lighting is config-view only.** In normal mode the page stays self-lit.
 - **The flat approximation clips shadows.** Normal mode grows the goo canvas to fit a floating button's shadow, but
   only up to 192 px past the button, so a deep page's displaced shadow leaves it. The config view traces it exactly.
@@ -675,7 +747,9 @@ tall page yet (M2).
   - the glass doesn't refract the UI texture.
 - **3D silhouettes alias slightly.** They're per-pixel (no coverage AA) and differ by a 1-px rim from normal
   mode's analytic edge at the camera pose.
-- **The scene isn't persisted.** It resets on reload.
+- **The document currently describes one page and one goo element.** Multiple pages and independent materials
+  on multiple elements require the later renderer milestones. Arbitrary page HTML and behavior are not editable
+  through the scene document yet.
 - **Touch is partial.** Pinch zooms, but two-finger pan is missing.
 
 ## Next steps and open questions
@@ -683,8 +757,9 @@ tall page yet (M2).
 The longer plan (tall pages and camera scrolling, several pages, scroll-scrubbed video, depth of field, gobos,
 materials on meshes, particles) is in [roadmap.md](roadmap.md).
 
-1. **Make the scene authoritative.** Persist and export it (JSON), and let look.ts hold only the environment (sky,
-   horizon, ground). The rig would then be the single source of lighting.
+1. **Shared scene authoring (implemented in M1).** JSON import/export, edits by id, revisions, history, named
+   materials and browser persistence now share one document. World lights are independent of page, element and
+   camera movement. A compact agent text grammar remains a research question.
 2. **Positional lighting in the glass.** Per-pixel light directions, point and spot lights, and any number of
    lights through a storage buffer. Shadows from more than the key light.
 3. **html-in-canvas for real (Chrome 157+).** Permanent drawable `.stage`, the glass refracting live UI, the label
@@ -693,13 +768,13 @@ materials on meshes, particles) is in [roadmap.md](roadmap.md).
 4. **One renderer for both modes?** Render normal mode through the 3D path when the scene departs from the flat
    defaults: lit paper, an off-axis camera, a deep page. That would trade the small goo canvas for a full-viewport
    pass.
-5. **Gizmo UX.** Axis constraints, snapping, numeric overlays, undo, and a two-finger pan.
+5. **Gizmo UX.** Axis constraints, snapping, numeric overlays and a two-finger pan. Document undo is in M1.
 6. **A levitating glass button.** Prototyped: hover distance, a pressed air cushion that sinks and tilts, and
    ray-based pressing in the config view. See [Levitating button](#levitating-button-prototype) for what is open.
 
 Open questions:
 
 - **Answered:** UI elements can live anywhere in 3D space.
-- Should the light rig follow the goo, as now, or be world-anchored, so lights stay put when the button moves?
+- **Answered (2026-10-29):** lights live in the world and stay put when pages, elements or the camera move.
 - Is the config view a dev and design tool only, or should users ever see it? (It is becoming a bigger part of the
   project.)

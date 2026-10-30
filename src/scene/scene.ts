@@ -1,7 +1,7 @@
 // The scene behind the flat page. A camera looks straight at the page; its frustum, cut at the reference
 // distance, is exactly the client viewport (CSS px), so the reference plane z = 0 is "the screen". The page is a
 // background plane that can be pushed back along −z, and the goo sits on the reference plane or floats in front of
-// it (scene.goo.hover; levitation.ts moves it when pressed). Lights hang on a rig around the goo. The page stands
+// it (scene.goo.hover; levitation.ts moves it when pressed). Lights keep their positions in the world. The page stands
 // upright like a screen on a wall: world up is screen-up (−y), and the scene camera is a level camera facing it.
 //
 // Normal mode still draws the flat page plus the goo overlay. The scene reaches it through the glass uniforms (key
@@ -16,20 +16,23 @@ import type { GlassParams } from '../gpu/schemas.ts';
 import type { Layout } from '../layout.ts';
 import type { LevitationPose } from '../levitation.ts';
 import { looks, type Look } from '../look.ts';
-import { add, clamp, DEG, dot, fromSpherical, normalize, scale, sub, toSpherical, type OrbitPose, type Vec3 } from './math.ts';
+import { add, clamp, DEG, dot, fromSpherical, length, normalize, scale, sub, toSpherical, type OrbitPose, type Vec3 } from './math.ts';
 
 export type GlassInput = d.InferInput<typeof GlassParams>;
 export type LightKind = 'sun' | 'softbox';
 
 export interface SceneLight {
+  id: string;
   name: string;
   kind: LightKind;
-  /** Direction from the rig target (the goo) toward the light. Kept verbatim from look.ts until the light moves. */
+  /** Authoritative world position (CSS px); page, element and camera changes leave it in place. */
+  position: Vec3;
+  /** The emitter's fixed world direction, pointing out from its illuminated side toward the emitter. */
   dir: Vec3;
   /** Softbox frame: long and short axes, as in look.ts (gnomonic coordinates around `dir`). */
   t: Vec3;
   b: Vec3;
-  /** Distance from the rig target (CSS px), and the distance at which the angular sizes below hold. */
+  /** Authored aiming distance (CSS px), and the distance at which the angular sizes below hold. */
   distance: number;
   refDistance: number;
   /** Angular sizes at `refDistance` (look.ts units): softbox half extents, corner and edge softness; sun radius. */
@@ -108,8 +111,10 @@ export function defaultScene(): Scene {
   const light = looks.light;
   const dark = looks.dark;
   const sun: SceneLight = {
+    id: 'sun',
     name: 'Sun (key)',
     kind: 'sun',
+    position: scale(normalize(v3(light.lightDir)), RIG_DISTANCE),
     dir: v3(light.lightDir),
     t: [1, 0, 0],
     b: [0, 1, 0],
@@ -123,8 +128,10 @@ export function defaultScene(): Scene {
   };
   const boxes = light.softboxes.map(
     (sb, i): SceneLight => ({
+      id: ['front-softbox', 'key-strip', 'cool-kicker'][i] ?? `softbox-${i + 1}`,
       name: SOFTBOX_NAMES[i] ?? `Softbox ${i + 1}`,
       kind: 'softbox',
+      position: scale(normalize(v3(sb.c)), RIG_DISTANCE),
       dir: v3(sb.c),
       t: v3(sb.t),
       b: v3(sb.b),
@@ -246,18 +253,50 @@ export const gooFrameDir = (f: GooFrame, v: Vec3): Vec3 => [dot(v, f.x) / f.scal
 export const fromGooFrame = (f: GooFrame, g: Vec3): Vec3 =>
   add(f.origin, scale(add(add(scale(f.x, g[0]), scale(f.y, g[1])), scale(f.z, g[2])), f.scale));
 
-/** The goo center at its rest hover (world), i.e. the rig target. Lights follow the hover, not the presses. */
-export function rigTarget(layout: Layout | null, scene: Scene): Vec3 {
+/** The goo center in the world, used to aim edited lights and to sample their angular appearance. */
+export function rigTarget(layout: Layout | null, scene: Scene, pose?: LevitationPose): Vec3 {
   const s = layout?.shapes[0];
-  if (!layout || !s) return [0, 0, scene.goo.hover];
-  const k = anchorScale(scene, scene.goo.hover);
-  return [k * (layout.canvasX + s.cx - layout.viewportW / 2), k * (layout.canvasY + s.cy - layout.viewportH / 2), scene.goo.hover];
+  const z = pose?.z ?? scene.goo.hover;
+  if (!layout || !s) return [0, 0, z];
+  const k = anchorScale(scene, z);
+  return [k * (layout.canvasX + s.cx - layout.viewportW / 2), k * (layout.canvasY + s.cy - layout.viewportH / 2), z];
+}
+
+/**
+ * Places a fresh default rig once, around the unlifted button. The host calls this after the first layout;
+ * imported documents already contain world positions and must not be initialized again.
+ */
+export function initializeWorldLights(scene: Scene, layout: Layout): void {
+  const s = layout.shapes[0];
+  if (!s) return;
+  const target: Vec3 = [layout.canvasX + s.cx - layout.viewportW / 2, layout.canvasY + s.cy - layout.viewportH / 2, 0];
+  for (const l of scene.lights) l.position = add(target, scale(normalize(l.dir), l.distance));
+}
+
+/** A light's world position. The optional target keeps older callers source-compatible; it is never a parent. */
+export const lightPosition = (l: SceneLight, _target?: Vec3): Vec3 => l.position;
+
+/**
+ * The calibration axis keeps look.ts's exact vectors and distance at the default composition. Everywhere else
+ * the position supplies the direction and distance; moving the observer never rewrites the light.
+ */
+function onCalibrationAxis(l: SceneLight, target: Vec3): boolean {
+  const off = sub(l.position, target);
+  const expected = scale(normalize(l.dir), l.distance);
+  return off.every((v, i) => Math.abs(v - expected[i]) <= 1e-9);
+}
+
+export const lightDistance = (l: SceneLight, target: Vec3): number =>
+  onCalibrationAxis(l, target) ? l.distance : Math.max(length(sub(l.position, target)), 1);
+
+export function lightDirection(l: SceneLight, target: Vec3): Vec3 {
+  const off = sub(l.position, target);
+  if (onCalibrationAxis(l, target) || length(off) < 1e-6) return l.dir;
+  return scale(normalize(off), length(l.dir));
 }
 
 /** Angular-size factor: lights keep their physical size, so they shrink in the glass as they move away. */
-export const sizeFactor = (l: SceneLight) => l.refDistance / l.distance;
-
-export const lightPosition = (l: SceneLight, target: Vec3): Vec3 => add(target, scale(normalize(l.dir), l.distance));
+export const sizeFactor = (l: SceneLight, target?: Vec3) => l.refDistance / (target ? lightDistance(l, target) : l.distance);
 
 /** Physical softbox half extents / sun radius (CSS px). */
 export const physicalHalfSize = (l: SceneLight): [number, number] =>
@@ -268,7 +307,9 @@ export const physicalHalfSize = (l: SceneLight): [number, number] =>
  * tangential around the page's axis, the short axis runs along the great circle through it). The light stays
  * between 1° and 85° off the page's axis, in front of the page.
  */
-export function aimLight(l: SceneLight, dir: Vec3) {
+export function aimLight(l: SceneLight, dir: Vec3, target?: Vec3) {
+  const origin = target ?? sub(l.position, scale(normalize(l.dir), l.distance));
+  if (target) l.distance = clamp(lightDistance(l, target), 150, 8000);
   const { polar, azimuth } = toSpherical(dir);
   const p = clamp(polar, 1, 85);
   const be = p * DEG;
@@ -276,6 +317,26 @@ export function aimLight(l: SceneLight, dir: Vec3) {
   l.dir = fromSpherical(p, azimuth);
   l.t = [-Math.sin(az), Math.cos(az), 0];
   l.b = [Math.cos(be) * Math.cos(az), Math.cos(be) * Math.sin(az), -Math.sin(be)];
+  l.position = add(origin, scale(normalize(l.dir), l.distance));
+}
+
+/** An explicit distance edit moves the world light along the ray from the chosen aiming point. */
+export function setLightDistance(l: SceneLight, distance: number, target: Vec3): void {
+  const direction = normalize(lightDirection(l, target));
+  l.distance = clamp(distance, 150, 8000);
+  l.position = add(target, scale(direction, l.distance));
+}
+
+/** Moves a light through the editor, preserving the existing aiming constraints. */
+export function moveWorldLight(l: SceneLight, position: Vec3, target: Vec3, distanceOnly = false): void {
+  const off = sub(position, target);
+  if (distanceOnly) {
+    setLightDistance(l, dot(off, normalize(lightDirection(l, target))), target);
+  } else {
+    l.position = position;
+    l.distance = clamp(length(off), 150, 8000);
+    aimLight(l, off, target);
+  }
 }
 
 // ───────────────────────────── what the glass sees ─────────────────────────────
@@ -283,22 +344,22 @@ export function aimLight(l: SceneLight, dir: Vec3) {
 const vec3f = (v: Vec3) => d.vec3f(v[0], v[1], v[2]);
 
 /** The scene's lights and camera as glass uniforms. At the default scene every value equals look.ts's. */
-export function glassLights(scene: Scene, theme: Theme): Partial<GlassInput> {
+export function glassLights(scene: Scene, theme: Theme, target: Vec3 = [0, 0, 0]): Partial<GlassInput> {
   const sun = scene.lights.find((l) => l.kind === 'sun');
   const boxes = scene.lights.filter((l) => l.kind === 'softbox');
   const look = looks[theme];
   const out: Partial<GlassInput> = { eyeDist: scene.camera.distance };
   if (sun) {
-    out.lightDir = vec3f(sun.dir);
+    out.lightDir = vec3f(lightDirection(sun, target));
     out.lightColor = vec3f(sun.radiance[theme]);
-    out.sunRadius = sun.radius * sizeFactor(sun);
+    out.sunRadius = sun.radius * sizeFactor(sun, target);
   }
   out.softboxes = look.softboxes.map((fallback, i) => {
     const l = boxes[i];
     if (!l) return { ...fallback, c: vec3f(fallback.c), t: vec3f(fallback.t), b: vec3f(fallback.b), radiance: d.vec3f(0), halfSize: d.vec2f(...fallback.halfSize) };
-    const k = sizeFactor(l);
+    const k = sizeFactor(l, target);
     return {
-      c: vec3f(l.dir),
+      c: vec3f(lightDirection(l, target)),
       t: vec3f(l.t),
       b: vec3f(l.b),
       radiance: vec3f(l.radiance[theme]),
@@ -311,10 +372,11 @@ export function glassLights(scene: Scene, theme: Theme): Partial<GlassInput> {
 }
 
 /** Shadow reach follows the tangent of the key light's angle off the page's axis (look.ts's value suits its sun). */
-function shadowReachFor(scene: Scene, look: Look): number {
+function shadowReachFor(scene: Scene, look: Look, target?: Vec3): number {
   const sun = scene.lights.find((l) => l.kind === 'sun');
   if (!sun) return look.shadowReach;
-  const tanNow = Math.hypot(sun.dir[0], sun.dir[1]) / Math.max(sun.dir[2], 1e-3);
+  const dir = target ? lightDirection(sun, target) : sun.dir;
+  const tanNow = Math.hypot(dir[0], dir[1]) / Math.max(dir[2], 1e-3);
   const tanRef = Math.hypot(look.lightDir[0], look.lightDir[1]) / look.lightDir[2];
   return tanNow === tanRef ? look.shadowReach : clamp(look.shadowReach * (tanNow / tanRef), 0, 30);
 }
@@ -328,10 +390,10 @@ export const airGap = (scene: Scene, pose: LevitationPose) => Math.max(pose.z + 
  * caustic model assumes the page touches the glass. Dents and the rim focus within a few tens of px, so past
  * that their caustics blur out (they are evaluated unblurred, so they fade instead).
  */
-export function gapSoftening(scene: Scene, look: Look, gap: number): Partial<GlassInput> {
+export function gapSoftening(scene: Scene, look: Look, gap: number, target?: Vec3): Partial<GlassInput> {
   if (gap <= 0) return {};
   const sun = scene.lights.find((l) => l.kind === 'sun');
-  const penumbra = sun ? sun.radius * sizeFactor(sun) : look.sunRadius;
+  const penumbra = sun ? sun.radius * sizeFactor(sun, target) : look.sunRadius;
   const blur = gap * (0.5 * penumbra + 0.06);
   return {
     gapBlur: blur,
@@ -351,9 +413,9 @@ export function gapSoftening(scene: Scene, look: Look, gap: number): Partial<Gla
  * to a limit; the config view traces all of it. Normal mode always shows the page filling the view: an unscaled
  * ("fixed") page is only drawn smaller in the config view.
  */
-export function glassDepthTerms(scene: Scene, look: Look, pose: LevitationPose): Partial<GlassInput> {
+export function glassDepthTerms(scene: Scene, look: Look, pose: LevitationPose, target?: Vec3): Partial<GlassInput> {
   const out: Partial<GlassInput> = {};
-  const reach = shadowReachFor(scene, look);
+  const reach = shadowReachFor(scene, look, target);
   if (reach !== look.shadowReach) out.shadowReach = reach;
   const gap = airGap(scene, pose);
   if (gap <= 0 && pose.tilt[0] === 0 && pose.tilt[1] === 0) return out;
@@ -361,7 +423,7 @@ export function glassDepthTerms(scene: Scene, look: Look, pose: LevitationPose):
   const g = scene.page.depth;
   return {
     ...out,
-    ...gapSoftening(scene, look, gap),
+    ...gapSoftening(scene, look, gap, target),
     gap,
     gapScale: pageForeshortening(scene),
     tilt: d.vec2f(pose.tilt[0], pose.tilt[1]),
@@ -373,11 +435,11 @@ export function glassDepthTerms(scene: Scene, look: Look, pose: LevitationPose):
 }
 
 /** Config view: the gap is traced for real, so only what the flat terms can't express is adjusted. */
-export function glassDepthTerms3d(scene: Scene, look: Look, pose: LevitationPose): Partial<GlassInput> {
+export function glassDepthTerms3d(scene: Scene, look: Look, pose: LevitationPose, target?: Vec3): Partial<GlassInput> {
   const out: Partial<GlassInput> = {};
-  const reach = shadowReachFor(scene, look);
+  const reach = shadowReachFor(scene, look, target);
   if (reach !== look.shadowReach) out.shadowReach = reach;
-  return { ...out, ...gapSoftening(scene, look, airGap(scene, pose)) };
+  return { ...out, ...gapSoftening(scene, look, airGap(scene, pose), target) };
 }
 
 /**
@@ -403,7 +465,7 @@ export function irradianceAt(l: SceneLight, p: Vec3, n: Vec3, target: Vec3, them
   const r2 = Math.max(toL[0] ** 2 + toL[1] ** 2 + toL[2] ** 2, 1);
   const r = Math.sqrt(r2);
   const [hx, hy] = physicalHalfSize(l);
-  // The diffuser faces the rig target (its normal is −dir).
+  // The diffuser keeps its world orientation (its normal is −dir).
   const facing = Math.max(0, (toL[0] * l.dir[0] + toL[1] * l.dir[1] + toL[2] * l.dir[2]) / (r * Math.hypot(...l.dir)));
   const cos = Math.max(0, (n[0] * toL[0] + n[1] * toL[1] + n[2] * toL[2]) / r);
   return scale(rad, (4 * hx * hy * facing * cos) / r2);
